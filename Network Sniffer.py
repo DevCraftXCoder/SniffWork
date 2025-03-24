@@ -66,7 +66,7 @@ class PacketSnifferApp:
         
         # Initialize variables first
         self.init_variables()
-        
+
         # Create a menu bar
         menu_bar = tk.Menu(self.root)
         self.root.config(menu=menu_bar)
@@ -1318,9 +1318,6 @@ This tool is designed for network administrators, security professionals, and an
             # Create and start the sniffing thread
             self.sniff_thread = threading.Thread(target=self.start_sniffing, daemon=True)
             self.sniff_thread.start()
-            # Update GUI to show sniffing status
-            self.status_bar.config(text="Status: Initializing capture...")
-            self.update_gui()
 
     def show_loading_indicator(self):
         """Show a loading indicator while capture is initializing."""
@@ -1409,20 +1406,12 @@ This tool is designed for network administrators, security professionals, and an
         """Stop the packet sniffing."""
         if self.sniffing:
             self.sniffing = False
-        self.clear_terminal()
-        print("\n" + "═" * 60)
-        print("Packet Capture Stopped")
-        print("Summary:")
-        print(f"Total Packets: {self.packet_count}")
-        print(f"TCP Packets: {self.protocol_count['TCP']}")
-        print(f"UDP Packets: {self.protocol_count['UDP']}")
-        print(f"ICMP Packets: {self.protocol_count['ICMP']}")
-        print(f"ARP Packets: {self.protocol_count['ARP']}")
-        print(f"DNS Packets: {self.protocol_count['DNS']}")
-        print("═" * 60 + "\n")
-        
-        self.output_text.insert(tk.END, "Sniffing stopped.\n")
-        self.output_text.see(tk.END)
+            self.clear_terminal()
+            print("\n" + "═" * 60)
+            print("Packet Capture Stopped")
+            print("═" * 60)
+            self.update_status("Packet capture stopped")
+            self.hide_loading_indicator()
 
     def packet_callback(self, packet):
         """Process captured packets and update statistics."""
@@ -2078,31 +2067,23 @@ This tool is designed for network administrators, security professionals, and an
                 self.ax.set_facecolor('#1E1E1E' if self.is_dark_mode else '#FFFFFF')
                 self.fig.set_facecolor('#2E2E2E' if self.is_dark_mode else '#F0F0F0')
                 
+                # Update grid color
+                self.ax.grid(color='#555555' if self.is_dark_mode else '#CCCCCC')
+                
                 # Set text colors
-                text_color = '#FFFFFF' if self.is_dark_mode else '#000000'
-                grid_color = '#FFFFFF' if self.is_dark_mode else '#808080'
-                line_color = '#00ff00' if self.is_dark_mode else '#008000'
+                self.ax.title.set_color('white' if self.is_dark_mode else 'black')
+                self.ax.xaxis.label.set_color('white' if self.is_dark_mode else 'black')
+                self.ax.yaxis.label.set_color('white' if self.is_dark_mode else 'black')
                 
-                # Update all text elements
-                self.ax.tick_params(colors=text_color, labelcolor=text_color)
-                
-                # Update title and labels
-                title_obj = self.ax.get_title()
-                self.ax.set_title(title_obj, color=text_color, pad=10, fontsize=10)
-                self.ax.set_xlabel(self.ax.get_xlabel(), color=text_color, fontsize=8)
-                self.ax.set_ylabel(self.ax.get_ylabel(), color=text_color, fontsize=8)
-                
+                # Set tick colors
+                for label in self.ax.get_xticklabels():
+                    label.set_color('white' if self.is_dark_mode else 'black')
+                for label in self.ax.get_yticklabels():
+                    label.set_color('white' if self.is_dark_mode else 'black')
+                    
                 # Update spines
                 for spine in self.ax.spines.values():
-                    spine.set_color(text_color)
-                
-                # Update grid
-                self.ax.grid(True, linestyle='--', alpha=0.3, color=grid_color)
-                
-                # Update line color if there's a plot
-                if len(self.ax.lines) > 0:
-                    for line in self.ax.lines:
-                        line.set_color(line_color)
+                    spine.set_edgecolor('white' if self.is_dark_mode else 'black')
                 
                 # Force redraw
                 self.canvas.draw()
@@ -2158,17 +2139,24 @@ This tool is designed for network administrators, security professionals, and an
         self.status_bar.config(text=message)
 
     def export_to_csv(self):
-        """Export captured packets to CSV file."""
+        """Export the captured packets to a CSV file."""
+        if not self.captured_packets:
+            messagebox.showinfo("No Data", "No packets captured yet. Start sniffing to capture packets.")
+            return
+        
         try:
-            file_path = tkinter.filedialog.asksaveasfilename(
+            # Ask user for filename
+            filename = filedialog.asksaveasfilename(
                 defaultextension=".csv",
-                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+                title="Save Packet Data as CSV"
             )
             
-            if not file_path:
+            if not filename:  # User cancelled
                 return
-
-            with open(file_path, 'w', newline='') as csvfile:
+                
+            # Write to CSV
+            with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
                 writer = csv.writer(csvfile)
                 # Write header
                 writer.writerow([
@@ -2179,22 +2167,20 @@ This tool is designed for network administrators, security professionals, and an
                     'Source Port',
                     'Destination Port',
                     'Length',
-                    'Source MAC',
-                    'Destination MAC',
-                    'TTL',
-                    'Flags'
+                    'Payload'
                 ])
-
-                # Write packet data
+                
+                # Write data rows
                 for packet in self.captured_packets:
                     row = self._format_packet_for_csv(packet)
                     writer.writerow(row)
-
-            messagebox.showinfo("Success", "Packets exported to CSV file successfully!")
+            
+            messagebox.showinfo("Export Complete", f"Successfully exported {len(self.captured_packets)} packets to {filename}")
+            self.update_status(f"Exported {len(self.captured_packets)} packets to CSV")
             
         except Exception as e:
-            logging.error(f"Error exporting to CSV: {e}")
-            messagebox.showerror("Error", f"Failed to export to CSV: {str(e)}")
+            messagebox.showerror("Export Error", f"Failed to export data: {str(e)}")
+            logging.error(f"CSV export error: {e}")
 
     def _format_packet_for_csv(self, packet):
         """Format a packet's data for CSV export."""
