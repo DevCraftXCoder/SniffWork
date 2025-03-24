@@ -18,6 +18,7 @@ import gc
 import csv
 import re
 import sys
+from matplotlib.figure import Figure
 
 # Configure logging
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s', filename='packet_sniffer.log', filemode='a')
@@ -33,13 +34,16 @@ class PacketSnifferApp:
         self.root = root
         self.root.title("SniffWork")
         
+        # Configure window properties
+        self.root.configure(bg="#2E2E2E")  # Dark background
+        
         # Get screen dimensions
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
         
-        # Calculate window size (55% width, 70% height)
-        window_width = int(screen_width * 0.55)
-        window_height = int(screen_height * 0.70)
+        # Calculate window size (60% width, 75% height)
+        window_width = int(screen_width * 0.60)
+        window_height = int(screen_height * 0.75)
         
         # Calculate position for center of screen
         position_x = (screen_width - window_width) // 2
@@ -48,9 +52,8 @@ class PacketSnifferApp:
         # Set window size and position
         self.root.geometry(f"{window_width}x{window_height}+{position_x}+{position_y}")
         
-        # Set window icon
+        # Set window icon and configure
         try:
-            # Get the directory where the script is located
             script_dir = os.path.dirname(os.path.abspath(__file__))
             icon_path = os.path.join(script_dir, "Angry.ico")
             
@@ -72,8 +75,40 @@ class PacketSnifferApp:
         view_menu = tk.Menu(menu_bar, tearoff=0)
         menu_bar.add_cascade(label="View", menu=view_menu)
 
-        # Add the Toggle Dark Mode option
-        view_menu.add_command(label="Toggle Dark Mode", command=self.toggle_dark_mode)
+        # Add the Toggle Mode option
+        view_menu.add_command(label="Toggle Modes", command=self.toggle_dark_mode)  # Changed label to be more generic
+
+        # Create status bar frame
+        self.status_frame = tk.Frame(self.root, bg="#2E2E2E")
+        self.status_frame.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        # Create status bar with loading indicator
+        self.status_bar = tk.Label(
+            self.status_frame,
+            text="Ready",
+            bd=1,
+            relief=tk.SUNKEN,
+            anchor=tk.W,
+            bg="#2E2E2E",
+            fg="white",
+            padx=10
+        )
+        self.status_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # Create loading indicator label
+        self.loading_label = tk.Label(
+            self.status_frame,
+            text="",
+            bg="#2E2E2E",
+            fg="#00ff00",
+            font=("Helvetica", 10),
+            padx=10
+        )
+        self.loading_label.pack(side=tk.RIGHT)
+        
+        # Initialize loading state
+        self.is_loading = False
+        self.loading_dots = 0
 
         # Initialize additional statistics
         self.total_bytes = 0  # Total bytes captured
@@ -92,31 +127,154 @@ class PacketSnifferApp:
         self.bytes_counts = []  # Store all byte counts
         self.start_time = time.time()
 
-        # Create a notebook (tabbed interface)
-        self.notebook = ttk.Notebook(root, style="TNotebook")
-        self.notebook.pack(fill=tk.BOTH, expand=True)
-
-        # Create tabs
-        self.create_tabs()
-
-        # Define styles for light and dark modes
+        # Configure styles before creating notebook
         self.style = ttk.Style()
-        self.style.configure("TFrame", background="#FFFFFF")  # Light mode
-        self.style.configure("Dark.TFrame", background="#2E2E2E")  # Dark mode
-        self.style.configure("TLabel", background="#FFFFFF", foreground="black")  # Light mode labels
-        self.style.configure("Dark.TLabel", background="#2E2E2E", foreground="white")  # Dark mode labels
-        self.style.configure("TButton", background="#007BFF", foreground="white")  # Button style
+        self.style.theme_use('default')  # Use default theme as base
+        
+        # Configure notebook style for dark mode
+        self.style.configure("Custom.TNotebook",
+                           background="#2E2E2E",
+                           foreground="white",
+                           padding=5)
+        
+        # Configure tab style for dark mode
+        self.style.configure("Custom.TNotebook.Tab",
+                           background="#1E1E1E",
+                           foreground="#FFFFFF",
+                           padding=[20, 10],
+                           font=('Helvetica', 10, 'bold'))
+        
+        # Map states for the tabs in dark mode
+        self.style.map("Custom.TNotebook.Tab",
+                      background=[("selected", "#007BFF"),
+                                ("active", "#0056b3"),
+                                ("!selected", "#1E1E1E")],
+                      foreground=[("selected", "#FFFFFF"),
+                                ("active", "#FFFFFF"),
+                                ("!selected", "#FFFFFF")])
 
-        self.is_dark_mode = False  # Track whether dark mode is enabled
-        self.is_updating_graph = False  # Initialize the flag
+        # Create notebook with custom style
+        self.notebook = ttk.Notebook(root, style="Custom.TNotebook")
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        self.status_bar = tk.Label(self.root, text="Ready", bd=1, relief=tk.SUNKEN, anchor=tk.W)
+        # Set dark mode as default
+        self.is_dark_mode = True  # Initialize in dark mode
+
+        self.status_bar = tk.Label(self.root, text="Ready", bd=1, relief=tk.SUNKEN, anchor=tk.W, 
+                                 bg="#2E2E2E", fg="white")  # Dark mode status bar
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
         # Add protocol-specific counters and times
-        self.protocol_times = {'TCP': [], 'UDP': [], 'ICMP': [], 'ARP': [], 'DNS': [], 'All': []}
-        self.protocol_counts = {'TCP': [], 'UDP': [], 'ICMP': [], 'ARP': [], 'DNS': [], 'All': []}
-        self.protocol_current_count = {'TCP': 0, 'UDP': 0, 'ICMP': 0, 'ARP': 0, 'DNS': 0, 'All': 0}
+        self.protocol_times = {
+            'TCP': deque(maxlen=3600),  # Store up to 1 hour of data (1 point per second)
+            'UDP': deque(maxlen=3600),
+            'ICMP': deque(maxlen=3600),
+            'ARP': deque(maxlen=3600),
+            'DNS': deque(maxlen=3600),
+            'All': deque(maxlen=3600)
+        }
+        self.protocol_counts = {
+            'TCP': deque(maxlen=3600),
+            'UDP': deque(maxlen=3600),
+            'ICMP': deque(maxlen=3600),
+            'ARP': deque(maxlen=3600),
+            'DNS': deque(maxlen=3600),
+            'All': deque(maxlen=3600)
+        }
+        self.protocol_current_count = {
+            'TCP': 0,
+            'UDP': 0,
+            'ICMP': 0,
+            'ARP': 0,
+            'DNS': 0,
+            'All': 0
+        }
+
+        # Initialize graph data
+        self.start_time = time.time()
+        self.last_update_time = self.start_time
+        self.update_interval = 1.0  # Update every second
+
+        # Create tabs with dark mode by default
+        self.create_tabs()
+
+        self.is_updating_graph = False  # Initialize the flag
+
+        # Add loading state variable
+        self.is_loading = False
+        self.loading_dots = 0
+
+    def configure_styles(self):
+        """Configure custom styles for the application with dark mode as default."""
+        self.style = ttk.Style()
+        
+        # Configure main theme for dark mode
+        self.style.configure("TNotebook",
+                           background="#2E2E2E",
+                           foreground="white",
+                           padding=5)
+        
+        # Configure tab style with dark theme
+        self.style.configure("TNotebook.Tab",
+                           background="#1E1E1E",
+                           foreground="#FFFFFF",
+                           padding=[20, 10],
+                           font=('Helvetica', 10, 'bold'))
+        
+        # Map different states for the tabs
+        self.style.map("TNotebook.Tab",
+                      background=[("selected", "#007BFF"),
+                                ("active", "#0056b3")],
+                      foreground=[("selected", "#FFFFFF"),
+                                ("active", "#FFFFFF")],
+                      expand=[("selected", [1, 1, 1, 0])])
+        
+        # Frame styles for dark mode
+        self.style.configure("Custom.TFrame",
+                           background="#2E2E2E",
+                           relief="raised",
+                           borderwidth=2)
+        
+        # Button styles with dark theme
+        self.style.configure("Blue.TButton",
+                           background="#007BFF",
+                           foreground="white",
+                           padding=[20, 10],
+                           font=('Helvetica', 10))
+        
+        self.style.configure("Red.TButton",
+                           background="#dc3545",
+                           foreground="white",
+                           padding=[20, 10],
+                           font=('Helvetica', 10))
+        
+        self.style.configure("Green.TButton",
+                           background="#28a745",
+                           foreground="white",
+                           padding=[20, 10],
+                           font=('Helvetica', 10))
+        
+        # Label styles for dark mode
+        self.style.configure("Custom.TLabel",
+                           background="#2E2E2E",
+                           foreground="white",
+                           font=('Helvetica', 10))
+        
+        # Entry styles for dark mode
+        self.style.configure("Custom.TEntry",
+                           fieldbackground="#3E3E3E",
+                           foreground="white",
+                           insertcolor="white",
+                           padding=5)
+
+        # Configure dark mode for all standard ttk widgets
+        for widget in ['TFrame', 'TLabel', 'TButton', 'TEntry', 'TCombobox']:
+            self.style.configure(widget,
+                               background="#2E2E2E",
+                               foreground="white",
+                               fieldbackground="#3E3E3E",
+                               selectbackground="#007BFF",
+                               selectforeground="white")
 
     def init_variables(self):
         """Initialize all variables used in the application."""
@@ -142,6 +300,17 @@ class PacketSnifferApp:
         self.sniffing = False
         self.start_time = time.time()
         
+        # Initialize log file path
+        self.log_file = "packet_log.json"
+        
+        # Create empty log file if it doesn't exist
+        if not os.path.exists(self.log_file):
+            try:
+                with open(self.log_file, "w", encoding='utf-8') as f:
+                    f.write("")  # Create empty file
+            except Exception as e:
+                logging.error(f"Error creating log file: {e}")
+        
         # Time series data
         self.packet_times = []
         self.packet_counts = []
@@ -149,20 +318,20 @@ class PacketSnifferApp:
         
         # Protocol-specific data
         self.protocol_times = {
-            'TCP': [],
-            'UDP': [],
-            'ICMP': [],
-            'ARP': [],
-            'DNS': [],
-            'All': []
+            'TCP': deque(maxlen=3600),
+            'UDP': deque(maxlen=3600),
+            'ICMP': deque(maxlen=3600),
+            'ARP': deque(maxlen=3600),
+            'DNS': deque(maxlen=3600),
+            'All': deque(maxlen=3600)
         }
         self.protocol_counts = {
-            'TCP': [],
-            'UDP': [],
-            'ICMP': [],
-            'ARP': [],
-            'DNS': [],
-            'All': []
+            'TCP': deque(maxlen=3600),
+            'UDP': deque(maxlen=3600),
+            'ICMP': deque(maxlen=3600),
+            'ARP': deque(maxlen=3600),
+            'DNS': deque(maxlen=3600),
+            'All': deque(maxlen=3600)
         }
         self.protocol_current_count = {
             'TCP': 0,
@@ -173,45 +342,184 @@ class PacketSnifferApp:
             'All': 0
         }
         
-        # File handling
-        self.log_file = "packet_log.json"
-        
         # Dark mode tracking
-        self.is_dark_mode = False
+        self.is_dark_mode = True  # Initialize in dark mode
         self.is_updating_graph = False
 
     def create_tabs(self):
         """Create the tabs for the application."""
-        self.packet_filter_tab = ttk.Frame(self.notebook)
-        self.logging_tab = ttk.Frame(self.notebook)
-        self.inspection_tab = ttk.Frame(self.notebook)
-        self.statistics_tab = ttk.Frame(self.notebook)
+        # Create frames with custom style
+        self.packet_filter_tab = ttk.Frame(self.notebook, style="Custom.TFrame")
+        self.logging_tab = ttk.Frame(self.notebook, style="Custom.TFrame")
+        self.inspection_tab = ttk.Frame(self.notebook, style="Custom.TFrame")
+        self.statistics_tab = ttk.Frame(self.notebook, style="Custom.TFrame")
+        self.about_tab = ttk.Frame(self.notebook, style="Custom.TFrame")  # New About tab
 
+        # Add tabs with custom style
         self.notebook.add(self.packet_filter_tab, text="Packet Filtering")
         self.notebook.add(self.logging_tab, text="Packet Logging")
         self.notebook.add(self.inspection_tab, text="Deep Packet Inspection")
         self.notebook.add(self.statistics_tab, text="Live Statistics")
+        self.notebook.add(self.about_tab, text="About")  # Add About tab
+
+        # Configure frame styles
+        for frame in [self.packet_filter_tab, self.logging_tab, 
+                     self.inspection_tab, self.statistics_tab, self.about_tab]:
+            frame.configure(style="Custom.TFrame")
 
         # Create frames for different sections
-        self.packet_filter_frame = ttk.Frame(self.packet_filter_tab)
+        self.packet_filter_frame = ttk.Frame(self.packet_filter_tab, style="Custom.TFrame")
+        self.logging_frame = ttk.Frame(self.logging_tab, style="Custom.TFrame")
+        self.inspection_frame = ttk.Frame(self.inspection_tab, style="Custom.TFrame")
+        self.statistics_frame = ttk.Frame(self.statistics_tab, style="Custom.TFrame")
+        self.about_frame = ttk.Frame(self.about_tab, style="Custom.TFrame")
+
+        # Pack frames with padding
         self.packet_filter_frame.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
-
-        self.logging_frame = ttk.Frame(self.logging_tab)
         self.logging_frame.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
-
-        self.inspection_frame = ttk.Frame(self.inspection_tab)
         self.inspection_frame.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
-
-        self.statistics_frame = ttk.Frame(self.statistics_tab)
         self.statistics_frame.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
+        self.about_frame.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
 
+        # Create tab contents
         self.create_packet_filter_tab()
         self.create_logging_tab()
         self.create_inspection_tab()
         self.create_statistics_tab()
+        self.create_about_tab()  # Create About tab content
 
         # Bind tab change event
         self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_change)
+
+    def create_about_tab(self):
+        """Create the content for the About tab."""
+        # Create main container frame with custom style
+        about_container = ttk.Frame(self.about_frame, style="Custom.TFrame")
+        about_container.pack(expand=True, fill=tk.BOTH, padx=20, pady=20)
+
+        # Title
+        title_frame = ttk.Frame(about_container, style="Custom.TFrame")
+        title_frame.pack(fill=tk.X, pady=(0, 20))
+
+        title_label = tk.Label(
+            title_frame,
+            text="SniffWork v1.0",
+            font=('Helvetica', 24, 'bold'),
+            bg="#2E2E2E" if self.is_dark_mode else "#F0F0F0",
+            fg="white" if self.is_dark_mode else "black"
+        )
+        title_label.pack(pady=(0, 5))
+
+        subtitle_label = tk.Label(
+            title_frame,
+            text="Advanced Network Packet Analyzer",
+            font=('Helvetica', 14),
+            bg="#2E2E2E" if self.is_dark_mode else "#F0F0F0",
+            fg="#00ff00" if self.is_dark_mode else "#008000"
+        )
+        subtitle_label.pack()
+
+        # Developer Credit
+        developer_frame = ttk.Frame(about_container, style="Custom.TFrame")
+        developer_frame.pack(fill=tk.X, pady=(0, 20))
+
+        developer_label = tk.Label(
+            developer_frame,
+            text="Developed by: DevCraftXCoder",
+            font=('Helvetica', 12, 'bold'),
+            bg="#2E2E2E" if self.is_dark_mode else "#F0F0F0",
+            fg="#007BFF"
+        )
+        developer_label.pack()
+
+        # Description Text
+        desc_frame = ttk.Frame(about_container, style="Custom.TFrame")
+        desc_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 20))
+
+        description_text = scrolledtext.ScrolledText(
+            desc_frame,
+            wrap=tk.WORD,
+            font=('Helvetica', 11),
+            bg="#1E1E1E" if self.is_dark_mode else "#FFFFFF",
+            fg="white" if self.is_dark_mode else "black",
+            relief="flat",
+            padx=10,
+            pady=10,
+            height=15
+        )
+        description_text.pack(fill=tk.BOTH, expand=True)
+
+        # Program description
+        about_text = """
+SniffWork is a powerful and user-friendly network packet analyzer designed for real-time network monitoring and analysis. 
+
+Key Features:
+• Real-time Packet Capture: Monitor network traffic in real-time with support for multiple protocols
+• Protocol Filtering: Filter packets by protocol (TCP, UDP, ICMP, ARP, DNS)
+• Deep Packet Inspection: Analyze detailed packet information including headers and payloads
+• Live Statistics: View real-time graphs and statistics of network traffic
+• Packet Logging: Save captured packets for later analysis
+• Dark/Light Mode: Customizable interface theme for comfortable viewing
+
+Supported Protocols:
+• TCP (Transmission Control Protocol)
+• UDP (User Datagram Protocol)
+• ICMP (Internet Control Message Protocol)
+• ARP (Address Resolution Protocol)
+• DNS (Domain Name System)
+
+Security Features:
+• Packet integrity verification
+• Protocol anomaly detection
+• Traffic pattern analysis
+• Detailed logging capabilities
+
+Usage:
+1. Start packet capture using the "Start Sniffing" button
+2. Select desired protocol filter from the dropdown menu
+3. View real-time packet information and statistics
+4. Use the logging feature to save captured packets
+5. Analyze packet details in the inspection tab
+6. Monitor traffic patterns in the statistics tab
+
+Note: Administrative privileges are required for packet capture functionality.
+
+This tool is designed for network administrators, security professionals, and anyone interested in understanding network traffic patterns and behavior.
+
+© 2024 DevCraftXCoder. All rights reserved.
+"""
+        description_text.insert(tk.END, about_text)
+        description_text.config(state='disabled')
+
+        # Version Info
+        version_frame = ttk.Frame(about_container, style="Custom.TFrame")
+        version_frame.pack(fill=tk.X, pady=(0, 10))
+
+        version_label = tk.Label(
+            version_frame,
+            text="Version 1.0 | Build 2024.03",
+            font=('Helvetica', 10),
+            bg="#2E2E2E" if self.is_dark_mode else "#F0F0F0",
+            fg="#888888"
+        )
+        version_label.pack(side=tk.LEFT)
+
+        # GitHub Link (if applicable)
+        github_label = tk.Label(
+            version_frame,
+            text="GitHub: DevCraftXCoder",
+            font=('Helvetica', 10),
+            bg="#2E2E2E" if self.is_dark_mode else "#F0F0F0",
+            fg="#007BFF",
+            cursor="hand2"
+        )
+        github_label.pack(side=tk.RIGHT)
+        github_label.bind("<Button-1>", lambda e: self.open_github())
+
+    def open_github(self):
+        """Open GitHub profile in default browser."""
+        import webbrowser
+        webbrowser.open("https://github.com/DevCraftXCoder")
 
     def on_tab_change(self, event):
         """Handle tab change events."""
@@ -220,141 +528,185 @@ class PacketSnifferApp:
         # You can add logic here to update the content of the tab if needed
 
     def create_packet_filter_tab(self):
-        """Create the content for the Packet Filtering tab."""
-        # Create main container frame
-        self.packet_filter_frame = ttk.Frame(self.packet_filter_tab)
+        """Create the content for the Packet Filtering tab with enhanced styling."""
+        # Create main container frame with custom style
+        self.packet_filter_frame = ttk.Frame(self.packet_filter_tab, style="Custom.TFrame")
         self.packet_filter_frame.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
 
-        # Main output text area with frame for centering
-        text_frame = ttk.Frame(self.packet_filter_frame)
+        # Header frame
+        header_frame = ttk.Frame(self.packet_filter_frame, style="Custom.TFrame")
+        header_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        header_label = ttk.Label(header_frame,
+                               text="Network Packet Capture",
+                               font=('Helvetica', 16, 'bold'),
+                               foreground="white",
+                               background="#2E2E2E")
+        header_label.pack(pady=10)
+
+        # Main output text area with enhanced styling
+        text_frame = ttk.Frame(self.packet_filter_frame, style="Custom.TFrame")
         text_frame.pack(expand=True, fill=tk.BOTH)
         
         self.output_text = scrolledtext.ScrolledText(
             text_frame,
             width=80,
             height=25,
-            bg="#FFFFFF",
-            fg="black",
-            font=("Arial", 12)
+            bg="#1E1E1E",
+            fg="#FFFFFF",
+            font=("Consolas", 11),
+            insertbackground="white",
+            selectbackground="#0056b3",
+            selectforeground="white",
+            padx=10,
+            pady=10
         )
         self.output_text.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
-        self.output_text.config(state='disabled')  # Make it read-only
+        self.output_text.config(state='disabled')
 
-        # Control frame for packet count and protocol selection
-        control_frame = ttk.Frame(self.packet_filter_frame)
-        control_frame.pack(fill=tk.X, padx=10, pady=5)
+        # Control panel with modern styling
+        control_panel = ttk.Frame(self.packet_filter_frame, style="Custom.TFrame")
+        control_panel.pack(fill=tk.X, padx=10, pady=5)
 
-        # Center container for controls
-        center_control = ttk.Frame(control_frame)
-        center_control.pack(expand=True)
+        # Status frame with gradient-like effect
+        status_frame = ttk.Frame(control_panel, style="Custom.TFrame")
+        status_frame.pack(fill=tk.X, pady=5)
 
-        # Packet count label
         self.packet_count_label = tk.Label(
-            center_control,
+            status_frame,
             text="Packets Captured: 0",
-            bg="#FFFFFF",
-            fg="black",
-            font=("Arial", 12)
+            font=('Helvetica', 12, 'bold'),
+            bg="#2E2E2E",
+            fg="#00ff00"
         )
         self.packet_count_label.pack(side=tk.LEFT, padx=10)
 
-        # Protocol filter dropdown
+        # Protocol selector with custom styling
+        protocol_frame = ttk.Frame(control_panel, style="Custom.TFrame")
+        protocol_frame.pack(fill=tk.X, pady=5)
+
+        protocol_label = ttk.Label(
+            protocol_frame,
+            text="Protocol Filter:",
+            font=('Helvetica', 10),
+            foreground="white",
+            background="#2E2E2E"
+        )
+        protocol_label.pack(side=tk.LEFT, padx=5)
+
         self.protocol_var = tk.StringVar(value="All")
         protocol_options = ["All", "TCP", "UDP", "ICMP", "ARP", "DNS"]
-        protocol_menu = ttk.OptionMenu(center_control, self.protocol_var, *protocol_options)
-        protocol_menu.pack(side=tk.LEFT, padx=10)
+        protocol_menu = ttk.OptionMenu(
+            protocol_frame,
+            self.protocol_var,
+            *protocol_options
+        )
+        protocol_menu.pack(side=tk.LEFT, padx=5)
 
-        # IP Entry frame
-        ip_frame = ttk.Frame(self.packet_filter_frame)
-        ip_frame.pack(fill=tk.X, padx=10, pady=5)
+        # IP Entry with modern styling
+        ip_frame = ttk.Frame(control_panel, style="Custom.TFrame")
+        ip_frame.pack(fill=tk.X, pady=5)
 
-        # Center container for IP entry
-        center_ip = ttk.Frame(ip_frame)
-        center_ip.pack(expand=True)
-
-        self.ip_entry = tk.Entry(center_ip, width=20, font=("Arial", 12))
-        self.ip_entry.pack(pady=5)
+        self.ip_entry = tk.Entry(
+            ip_frame,
+            width=20,
+            font=("Helvetica", 11),
+            bg="#3E3E3E",
+            fg="white",
+            insertbackground="white",
+            relief="flat"
+        )
+        self.ip_entry.pack(side=tk.LEFT, padx=5, pady=5)
         self.ip_entry.insert(0, "Enter IP Address")
         self.ip_entry.bind("<FocusIn>", self.on_entry_click)
         self.ip_entry.bind("<FocusOut>", self.on_focus_out)
 
-        # Button frames
-        button_frame = ttk.Frame(self.packet_filter_frame)
-        button_frame.pack(fill=tk.X, padx=10, pady=5)
+        # Button container with modern styling
+        button_container = ttk.Frame(self.packet_filter_frame, style="Custom.TFrame")
+        button_container.pack(fill=tk.X, padx=10, pady=10)
 
-        # Center container for buttons
-        center_buttons = ttk.Frame(button_frame)
-        center_buttons.pack(expand=True)
-
-        # Blue buttons frame
-        blue_button_frame = ttk.Frame(center_buttons)
-        blue_button_frame.pack(pady=5)
-
-        # Blue Buttons
+        # Action buttons with enhanced styling
         start_button = tk.Button(
-            blue_button_frame,
-            text="Start Sniffing",
+            button_container,
+            text="▶ Start Sniffing",
             command=self.start_sniffing_thread,
-            bg="#007BFF",
+            bg="#28a745",
             fg="white",
-            font=("Arial", 12),
+            font=("Helvetica", 11, "bold"),
+            relief="flat",
             padx=20,
-            pady=5
+            pady=8,
+            cursor="hand2"
         )
         start_button.pack(side=tk.LEFT, padx=5)
 
-        ping_button = tk.Button(
-            blue_button_frame,
-            text="Ping",
-            command=self.ping,
-            bg="#007BFF",
-            fg="white",
-            font=("Arial", 12),
-            padx=20,
-            pady=5
-        )
-        ping_button.pack(side=tk.LEFT, padx=5)
-
-        # Red buttons frame
-        red_button_frame = ttk.Frame(center_buttons)
-        red_button_frame.pack(pady=5)
-
-        # Red Buttons
         stop_button = tk.Button(
-            red_button_frame,
-            text="Stop Sniffing",
+            button_container,
+            text="⬛ Stop Sniffing",
             command=self.stop_sniffing,
             bg="#dc3545",
             fg="white",
-            font=("Arial", 12),
+            font=("Helvetica", 11, "bold"),
+            relief="flat",
             padx=20,
-            pady=5
+            pady=8,
+            cursor="hand2"
         )
         stop_button.pack(side=tk.LEFT, padx=5)
 
-        clear_button = tk.Button(
-            red_button_frame,
-            text="Clear Output",
-            command=self.clear_output,
-            bg="#dc3545",
+        ping_button = tk.Button(
+            button_container,
+            text="📡 Ping",
+            command=self.ping,
+            bg="#007BFF",
             fg="white",
-            font=("Arial", 12),
+            font=("Helvetica", 11, "bold"),
+            relief="flat",
             padx=20,
-            pady=5
+            pady=8,
+            cursor="hand2"
+        )
+        ping_button.pack(side=tk.LEFT, padx=5)
+
+        clear_button = tk.Button(
+            button_container,
+            text="🗑 Clear Output",
+            command=self.clear_output,
+            bg="#6c757d",
+            fg="white",
+            font=("Helvetica", 11, "bold"),
+            relief="flat",
+            padx=20,
+            pady=8,
+            cursor="hand2"
         )
         clear_button.pack(side=tk.LEFT, padx=5)
 
-        clear_cache_button = tk.Button(
-            red_button_frame,
-            text="Clear Cache",
-            command=self.clear_cache,
-            bg="#dc3545",
-            fg="white",
-            font=("Arial", 12),
-            padx=20,
-            pady=5
-        )
-        clear_cache_button.pack(side=tk.LEFT, padx=5)
+        # Add hover effects for buttons
+        for button in [start_button, stop_button, ping_button, clear_button]:
+            button.bind("<Enter>", lambda e, b=button: self.on_button_hover(e, b))
+            button.bind("<Leave>", lambda e, b=button: self.on_button_leave(e, b))
+
+    def on_button_hover(self, event, button):
+        """Handle button hover effect."""
+        original_color = button.cget("background")
+        # Darken the color for hover effect
+        r = int(int(original_color[1:3], 16) * 0.8)
+        g = int(int(original_color[3:5], 16) * 0.8)
+        b = int(int(original_color[5:7], 16) * 0.8)
+        button.configure(background=f"#{r:02x}{g:02x}{b:02x}")
+
+    def on_button_leave(self, event, button):
+        """Handle button leave effect."""
+        # Restore original color
+        if "Start" in button.cget("text"):
+            button.configure(background="#28a745")
+        elif "Stop" in button.cget("text"):
+            button.configure(background="#dc3545")
+        elif "Ping" in button.cget("text"):
+            button.configure(background="#007BFF")
+        else:
+            button.configure(background="#6c757d")
 
     def on_entry_click(self, event):
         """Clear placeholder text when entry is clicked."""
@@ -369,119 +721,174 @@ class PacketSnifferApp:
             self.ip_entry.config(fg='grey')
 
     def create_logging_tab(self):
-        """Create the content for the Packet Logging tab."""
-        # Create main container frame
-        logging_container = ttk.Frame(self.logging_frame)
+        """Create the content for the Packet Logging tab with modern styling."""
+        # Create main container frame with custom style
+        logging_container = ttk.Frame(self.logging_frame, style="Custom.TFrame")
         logging_container.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
 
-        # Text area frame
-        text_frame = ttk.Frame(logging_container)
+        # Header frame
+        header_frame = ttk.Frame(logging_container, style="Custom.TFrame")
+        header_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        header_label = ttk.Label(header_frame,
+                               text="Packet Log Viewer",
+                               font=('Helvetica', 16, 'bold'),
+                               foreground="white",
+                               background="#2E2E2E")
+        header_label.pack(pady=10)
+
+        # Text area frame with modern styling
+        text_frame = ttk.Frame(logging_container, style="Custom.TFrame")
         text_frame.pack(expand=True, fill=tk.BOTH)
 
         self.logging_text = scrolledtext.ScrolledText(
             text_frame,
             width=80,
             height=25,
-            bg="#FFFFFF",
-            fg="black",
-            font=("Arial", 12)
+            bg="#1E1E1E",
+            fg="#FFFFFF",
+            font=("Consolas", 11),
+            insertbackground="white",
+            selectbackground="#0056b3",
+            selectforeground="white",
+            padx=10,
+            pady=10
         )
         self.logging_text.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
-        self.logging_text.config(state='disabled')  # Make it read-only
+        self.logging_text.config(state='disabled')
 
-        # Create a frame for buttons
-        button_frame = ttk.Frame(logging_container)
-        button_frame.pack(fill=tk.X, pady=5)
+        # Button container with modern styling
+        button_container = ttk.Frame(logging_container, style="Custom.TFrame")
+        button_container.pack(fill=tk.X, pady=10)
 
         # Center container for buttons
-        center_buttons = ttk.Frame(button_frame)
+        center_buttons = ttk.Frame(button_container, style="Custom.TFrame")
         center_buttons.pack(expand=True)
 
-        # Create left frame for blue buttons
-        blue_button_frame = ttk.Frame(center_buttons)
-        blue_button_frame.pack(side=tk.LEFT, padx=10)
-
-        # Create right frame for export buttons
-        export_button_frame = ttk.Frame(center_buttons)
-        export_button_frame.pack(side=tk.LEFT, padx=10)
-
-        # Create frame for red buttons
-        red_button_frame = ttk.Frame(center_buttons)
-        red_button_frame.pack(side=tk.LEFT, padx=10)
-
-        # Blue buttons (viewing and updating)
-        log_button = tk.Button(
-            blue_button_frame,
-            text="View Packet Log",
+        # View and Update buttons (Blue)
+        view_button = tk.Button(
+            center_buttons,
+            text="📋 View Packet Log",
             command=self.view_packet_log,
             bg="#007BFF",
             fg="white",
-            font=("Arial", 12),
+            font=("Helvetica", 11, "bold"),
+            relief="flat",
             padx=20,
-            pady=5
+            pady=8,
+            cursor="hand2"
         )
-        log_button.pack(side=tk.LEFT, padx=5)
+        view_button.pack(side=tk.LEFT, padx=5)
 
-        update_log_button = tk.Button(
-            blue_button_frame,
-            text="Update View Log",
+        update_button = tk.Button(
+            center_buttons,
+            text="🔄 Update View",
             command=self.update_view_log,
             bg="#007BFF",
             fg="white",
-            font=("Arial", 12),
+            font=("Helvetica", 11, "bold"),
+            relief="flat",
             padx=20,
-            pady=5
+            pady=8,
+            cursor="hand2"
         )
-        update_log_button.pack(side=tk.LEFT, padx=5)
+        update_button.pack(side=tk.LEFT, padx=5)
 
-        # Export buttons (green)
+        # Export buttons (Green)
         export_json_button = tk.Button(
-            export_button_frame,
-            text="Export to JSON",
+            center_buttons,
+            text="💾 Export JSON",
             command=self.export_packet_log,
             bg="#28a745",
             fg="white",
-            font=("Arial", 12),
+            font=("Helvetica", 11, "bold"),
+            relief="flat",
             padx=20,
-            pady=5
+            pady=8,
+            cursor="hand2"
         )
         export_json_button.pack(side=tk.LEFT, padx=5)
 
         export_csv_button = tk.Button(
-            export_button_frame,
-            text="Export to CSV",
+            center_buttons,
+            text="📊 Export CSV",
             command=self.export_to_csv,
             bg="#28a745",
             fg="white",
-            font=("Arial", 12),
+            font=("Helvetica", 11, "bold"),
+            relief="flat",
             padx=20,
-            pady=5
+            pady=8,
+            cursor="hand2"
         )
         export_csv_button.pack(side=tk.LEFT, padx=5)
 
-        # Clear logs button (red)
+        # Clear logs button (Red)
         clear_logs_button = tk.Button(
-            red_button_frame,
-            text="Clear Logs",
+            center_buttons,
+            text="🗑 Clear Log File",
             command=self.clear_packet_logs,
             bg="#dc3545",
             fg="white",
-            font=("Arial", 12),
+            font=("Helvetica", 11, "bold"),
+            relief="flat",
             padx=20,
-            pady=5
+            pady=8,
+            cursor="hand2"
         )
         clear_logs_button.pack(side=tk.LEFT, padx=5)
+
+        # Add hover effects for all buttons
+        for button in [view_button, update_button, export_json_button, 
+                      export_csv_button, clear_logs_button]:
+            button.bind("<Enter>", lambda e, b=button: self.on_button_hover(e, b))
+            button.bind("<Leave>", lambda e, b=button: self.on_button_leave(e, b))
+
+        # Create pagination frame with modern styling
+        self.pagination_frame = ttk.Frame(logging_container, style="Custom.TFrame")
+        self.pagination_frame.pack(fill=tk.X, pady=10)
+
+        # Style for pagination controls
+        pagination_style = {
+            'bg': "#3E3E3E",
+            'fg': "white",
+            'font': ("Helvetica", 10),
+            'relief': "flat",
+            'padx': 10,
+            'pady': 5,
+            'cursor': "hand2"
+        }
 
     def clear_packet_logs(self):
         """Clear the packet log file after confirmation."""
         if messagebox.askyesno("Clear Logs", "Are you sure you want to clear all packet logs? This cannot be undone."):
             try:
-                # Clear the log file
-                open(self.log_file, 'w').close()
+                # Get absolute path of the log file
+                abs_log_path = os.path.abspath(self.log_file)
+                print(f"Clearing log file at: {abs_log_path}")  # Debug print
+                
+                try:
+                    # First try to remove the file completely
+                    if os.path.exists(abs_log_path):
+                        os.remove(abs_log_path)
+                        print("File removed successfully")  # Debug print
+                except Exception as e:
+                    print(f"Could not remove file: {e}")  # Debug print
+                    # If removal fails, try to clear contents
+                    with open(abs_log_path, 'w', encoding='utf-8') as f:
+                        f.truncate(0)  # Truncate file to 0 bytes
+                        f.flush()  # Force write to disk
+                        os.fsync(f.fileno())  # Ensure it's written to disk
+                
+                # Create new empty file
+                with open(abs_log_path, 'w', encoding='utf-8') as f:
+                    f.write("")  # Create empty file
+                    f.flush()
+                    os.fsync(f.fileno())
                 
                 # Clear the display
                 self.clear_text(self.logging_text)
-                self.insert_text(self.logging_text, "Packet logs cleared.\n")
+                self.insert_text(self.logging_text, "Packet logs cleared successfully.\n")
                 
                 # Reset pagination
                 self.current_page = 0
@@ -492,82 +899,154 @@ class PacketSnifferApp:
                 if hasattr(self, 'next_button'):
                     self.next_button.config(state=tk.DISABLED)
                 
+                # Clear the packet list in inspection tab
+                if hasattr(self, 'packet_listbox'):
+                    self.packet_listbox.delete(0, tk.END)
+                
+                # Update status
+                self.status_bar.config(text="Packet logs cleared")
+                
+                # Force garbage collection
+                gc.collect()
+                
+                # Verify file is empty
+                if os.path.exists(abs_log_path):
+                    size = os.path.getsize(abs_log_path)
+                    if size == 0:
+                        print("Verified: File is empty")  # Debug print
+                    else:
+                        print(f"Warning: File size is {size} bytes")  # Debug print
+                
                 messagebox.showinfo("Success", "Packet logs have been cleared successfully.")
+                
+            except PermissionError:
+                messagebox.showerror("Error", "Permission denied. Cannot clear log file. Try running the application as administrator.")
+                logging.error(f"Permission denied while clearing log file at {abs_log_path}")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to clear packet logs: {str(e)}")
                 logging.error(f"Error clearing packet logs: {e}")
+                print(f"Error details: {e}")  # Debug print
 
     def create_inspection_tab(self):
-        """Create the content for the Deep Packet Inspection tab."""
-        # Create main container frame
-        inspection_container = ttk.Frame(self.inspection_frame)
+        """Create the content for the Packet Inspection tab with modern styling."""
+        # Create main container frame with custom style
+        inspection_container = ttk.Frame(self.inspection_frame, style="Custom.TFrame")
         inspection_container.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
 
-        # Text area frame
-        text_frame = ttk.Frame(inspection_container)
-        text_frame.pack(expand=True, fill=tk.BOTH)
+        # Header frame
+        header_frame = ttk.Frame(inspection_container, style="Custom.TFrame")
+        header_frame.pack(fill=tk.X, padx=10, pady=5)
 
-        self.inspection_text = scrolledtext.ScrolledText(
-            text_frame,
-            width=80,
-            height=25,
-            bg="#FFFFFF",
-            fg="black",
-            font=("Arial", 12)
+        header_label = ttk.Label(header_frame,
+                               text="Packet Inspector",
+                               font=('Helvetica', 16, 'bold'),
+                               foreground="white",
+                               background="#2E2E2E")
+        header_label.pack(pady=10)
+
+        # Create left panel for packet list
+        left_panel = ttk.Frame(inspection_container, style="Custom.TFrame")
+        left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+
+        # Packet list with modern styling
+        self.packet_listbox = tk.Listbox(
+            left_panel,
+            bg="#1E1E1E",
+            fg="#FFFFFF",
+            font=("Consolas", 11),
+            selectmode=tk.SINGLE,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=1,
+            highlightcolor="#007BFF",
+            selectbackground="#0056b3",
+            selectforeground="white"
         )
-        self.inspection_text.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
-        self.inspection_text.config(state='disabled')  # Make it read-only
+        self.packet_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Scrollbar for packet list
+        list_scrollbar = ttk.Scrollbar(left_panel)
+        list_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Configure scrollbar
+        self.packet_listbox.config(yscrollcommand=list_scrollbar.set)
+        list_scrollbar.config(command=self.packet_listbox.yview)
 
-        # Button frame
-        button_frame = ttk.Frame(inspection_container)
-        button_frame.pack(fill=tk.X, pady=5)
+        # Create right panel for packet details
+        right_panel = ttk.Frame(inspection_container, style="Custom.TFrame")
+        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
 
-        # Center container for buttons
-        center_buttons = ttk.Frame(button_frame)
-        center_buttons.pack(expand=True)
+        # Packet details text area with modern styling
+        self.packet_details = scrolledtext.ScrolledText(
+            right_panel,
+            width=50,
+            height=25,
+            bg="#1E1E1E",
+            fg="#FFFFFF",
+            font=("Consolas", 11),
+            insertbackground="white",
+            selectbackground="#0056b3",
+            selectforeground="white",
+            padx=10,
+            pady=10
+        )
+        self.packet_details.pack(fill=tk.BOTH, expand=True)
+        self.packet_details.config(state='disabled')
 
-        # Analysis buttons frame
-        analysis_button_frame = ttk.Frame(center_buttons)
-        analysis_button_frame.pack(pady=5)
+        # Button container with modern styling
+        button_container = ttk.Frame(inspection_container, style="Custom.TFrame")
+        button_container.pack(fill=tk.X, pady=10)
 
-        # Analyze Last Packet button
-        inspect_button = tk.Button(
-            analysis_button_frame,
-            text="Analyze Last Packet",
-            command=self.analyze_last_packet,
+        # Action buttons with modern styling
+        refresh_button = tk.Button(
+            button_container,
+            text="🔄 Refresh List",
+            command=self.refresh_packet_list,
             bg="#007BFF",
             fg="white",
-            font=("Arial", 12),
+            font=("Helvetica", 11, "bold"),
+            relief="flat",
             padx=20,
-            pady=5
+            pady=8,
+            cursor="hand2"
+        )
+        refresh_button.pack(side=tk.LEFT, padx=5)
+
+        inspect_button = tk.Button(
+            button_container,
+            text="🔍 Inspect Packet",
+            command=self.inspect_selected_packet,
+            bg="#28a745",
+            fg="white",
+            font=("Helvetica", 11, "bold"),
+            relief="flat",
+            padx=20,
+            pady=8,
+            cursor="hand2"
         )
         inspect_button.pack(side=tk.LEFT, padx=5)
 
-        # Analyze All Packets button
-        analyze_all_button = tk.Button(
-            analysis_button_frame,
-            text="Analyze All Packets",
-            command=self.analyze_all_packets,
-            bg="#007BFF",
-            fg="white",
-            font=("Arial", 12),
-            padx=20,
-            pady=5
-        )
-        analyze_all_button.pack(side=tk.LEFT, padx=5)
-
-        # Clear Analysis button
-        clear_analysis_button = tk.Button(
-            analysis_button_frame,
-            text="Clear Analysis",
-            command=lambda: self.clear_text(self.inspection_text),
+        clear_button = tk.Button(
+            button_container,
+            text="🗑 Clear Details",
+            command=self.clear_packet_details,
             bg="#dc3545",
             fg="white",
-            font=("Arial", 12),
+            font=("Helvetica", 11, "bold"),
+            relief="flat",
             padx=20,
-            pady=5
+            pady=8,
+            cursor="hand2"
         )
-        clear_analysis_button.pack(side=tk.LEFT, padx=5)
+        clear_button.pack(side=tk.LEFT, padx=5)
+
+        # Add hover effects for buttons
+        for button in [refresh_button, inspect_button, clear_button]:
+            button.bind("<Enter>", lambda e, b=button: self.on_button_hover(e, b))
+            button.bind("<Leave>", lambda e, b=button: self.on_button_leave(e, b))
+
+        # Bind selection event
+        self.packet_listbox.bind('<<ListboxSelect>>', self.on_select_packet)
 
     def analyze_last_packet(self):
         """Analyze the last captured packet in detail."""
@@ -649,7 +1128,7 @@ class PacketSnifferApp:
             # Payload Analysis
             if Raw in packet:
                 analysis += "=== Payload ===\n"
-                raw_payload = packet[Raw].load
+                raw_payload = packet[Raw].load.decode('utf-8', errors='replace')
                 try:
                     # Try to decode as ASCII
                     decoded_payload = raw_payload.decode('ascii', errors='replace')
@@ -832,110 +1311,104 @@ class PacketSnifferApp:
 
     def start_sniffing_thread(self):
         """Start the packet sniffing in a separate thread."""
-        self.sniffing = True
-        sniffing_thread = threading.Thread(target=self.start_sniffing, args=(self.output_text,), daemon=True)
-        sniffing_thread.start()
-
-    def start_sniffing(self, output_text):
-        """Start capturing packets."""
-        try:
-            self.clear_terminal()  # Clear terminal before starting capture
-            self.print_capture_banner()  # Print capture start banner
-            
-            self.start_time = time.time()
+        if not self.sniffing:
+            self.sniffing = True
+            # Show loading indicator
+            self.show_loading_indicator()
+            # Create and start the sniffing thread
+            self.sniff_thread = threading.Thread(target=self.start_sniffing, daemon=True)
+            self.sniff_thread.start()
+            # Update GUI to show sniffing status
+            self.status_bar.config(text="Status: Initializing capture...")
             self.update_gui()
-            
-            # Check for admin privileges
-            if platform.system() == 'Windows':
-                import ctypes
-                if not ctypes.windll.shell32.IsUserAnAdmin():
-                    print("\n[ERROR] Administrative privileges required!")
-                    print("Please run the application as administrator.\n")
-                    messagebox.showerror("Permission Error", "This application requires administrative privileges. Please run as administrator.")
-                    return
-            else:
-                if not os.geteuid() == 0:
-                    print("\n[ERROR] Root privileges required!")
-                    print("Please run the application with sudo.\n")
-                    messagebox.showerror("Permission Error", "This application requires administrative privileges.")
-                    return
-            
-            print("\n[INFO] Starting packet capture...")
-            print("[INFO] Press Ctrl+C in the GUI to stop capturing.\n")
-            
-            # Start packet capture
-            sniff(prn=self.packet_callback, store=False, filter=self.get_filter_string())
-            
-        except Exception as e:
-            error_msg = f"\n[ERROR] Failed to start packet capture: {str(e)}"
-            print(error_msg)
-            logging.error(f"Error starting packet capture: {e}")
-            messagebox.showerror("Error", f"Failed to start packet capture: {str(e)}")
 
-    def get_filter_string(self):
-        """Get the filter string based on selected protocol."""
-        protocol = self.protocol_var.get()
-        if protocol == "All":
-            return ""
-        elif protocol == "DNS":
-            return "(udp port 53) or (tcp port 53)"  # Capture both UDP and TCP DNS traffic
-        elif protocol == "ARP":
-            return "arp"
-        else:
-            return protocol.lower()
-
-    def print_capture_banner(self):
-        """Print a banner when capture starts."""
-        banner = """
-╔══════════════════════════════════════════════════════════════╗
-║                   Packet Capture Started                      ║
-╚══════════════════════════════════════════════════════════════╝
-"""
-        print(banner)
-
-    def update_gui(self):
-        """Update the GUI with the latest statistics."""
-        try:
-            # Batch updates to reduce GUI overhead
-            updates = {
-                self.packet_count_label: f"Packets Captured: {self.packet_count}",
-                self.total_bytes_label: f"Total Bytes: {self.total_bytes}",
-                self.icmp_count_label: f"ICMP Packets: {self.protocol_count['ICMP']}",
-                self.tcp_count_label: f"TCP Packets: {self.protocol_count['TCP']}",
-                self.udp_count_label: f"UDP Packets: {self.protocol_count['UDP']}",
-                self.arp_count_label: f"ARP Packets: {self.protocol_count['ARP']}",
-                self.dns_count_label: f"DNS Packets: {self.protocol_count['DNS']}"
-            }
+    def show_loading_indicator(self):
+        """Show a loading indicator while capture is initializing."""
+        if not hasattr(self, 'loading_window'):
+            # Create loading window
+            self.loading_window = tk.Toplevel(self.root)
+            self.loading_window.title("Initializing Capture")
             
-            for label, text in updates.items():
-                label.config(text=text)
+            # Make window non-modal and remove grab
+            self.loading_window.transient(self.root)
             
-            # Reduce update frequency for better performance
-            self.root.after(2000, self.update_gui)  # Update every 2 seconds
+            # Remove window decorations and make it stay on top
+            self.loading_window.overrideredirect(True)
+            self.loading_window.attributes('-topmost', True)
             
-        except Exception as e:
-            logging.error(f"Error updating GUI: {e}")
+            # Calculate position - place it in the top-right corner of the main window
+            main_x = self.root.winfo_x()
+            main_y = self.root.winfo_y()
+            main_width = self.root.winfo_width()
+            
+            window_width = 200
+            window_height = 50
+            
+            # Position the window in the top-right corner with a small margin
+            x = main_x + main_width - window_width - 20
+            y = main_y + 20
+            
+            self.loading_window.geometry(f"{window_width}x{window_height}+{x}+{y}")
+            
+            # Create a frame with a border effect
+            frame = tk.Frame(
+                self.loading_window,
+                bg="#2E2E2E" if self.is_dark_mode else "#F0F0F0",
+                bd=1,
+                relief="solid"
+            )
+            frame.pack(fill=tk.BOTH, expand=True)
+            
+            # Add loading message and dots in a horizontal layout
+            msg_frame = tk.Frame(
+                frame,
+                bg="#2E2E2E" if self.is_dark_mode else "#F0F0F0"
+            )
+            msg_frame.pack(fill=tk.BOTH, expand=True)
+            
+            self.loading_label = tk.Label(
+                msg_frame,
+                text="Initializing",
+                font=("Helvetica", 10),
+                bg="#2E2E2E" if self.is_dark_mode else "#F0F0F0",
+                fg="white" if self.is_dark_mode else "black"
+            )
+            self.loading_label.pack(side=tk.LEFT, padx=5)
+            
+            self.dots_label = tk.Label(
+                msg_frame,
+                text="",
+                font=("Helvetica", 10),
+                bg="#2E2E2E" if self.is_dark_mode else "#F0F0F0",
+                fg="#00ff00" if self.is_dark_mode else "#008000"
+            )
+            self.dots_label.pack(side=tk.LEFT)
+            
+            self.is_loading = True
+            self.animate_loading()
+            
+            # Update the window's position when the main window moves
+            self.root.bind('<Configure>', self.update_loading_position)
 
-    def update_statistics(self):
-        """Update packet statistics."""
-        try:
-            if self.packet_sizes:
-                avg_size = sum(self.packet_sizes) / len(self.packet_sizes)
-                max_size = max(self.packet_sizes)
-                min_size = min(self.packet_sizes)
-                
-                self.average_packet_size_label.config(
-                    text=f"Average Packet Size: {avg_size:.2f} bytes")
-                self.max_packet_size_label.config(
-                    text=f"Max Packet Size: {max_size} bytes")
-                self.min_packet_size_label.config(
-                    text=f"Min Packet Size: {min_size} bytes")
-        except Exception as e:
-            logging.error(f"Error updating statistics: {e}")
+    def animate_loading(self):
+        """Animate the loading indicator dots."""
+        if self.is_loading:
+            dots = "." * (self.loading_dots % 4)
+            self.dots_label.config(text=dots)
+            self.loading_dots += 1
+            self.root.after(500, self.animate_loading)
+
+    def hide_loading_indicator(self):
+        """Hide the loading indicator."""
+        if hasattr(self, 'loading_window'):
+            self.is_loading = False
+            self.loading_window.destroy()
+            delattr(self, 'loading_window')
 
     def stop_sniffing(self):
         """Stop the packet sniffing."""
-        self.sniffing = False
+        if self.sniffing:
+            self.sniffing = False
         self.clear_terminal()
         print("\n" + "═" * 60)
         print("Packet Capture Stopped")
@@ -952,122 +1425,112 @@ class PacketSnifferApp:
         self.output_text.see(tk.END)
 
     def packet_callback(self, packet):
-        """Process captured packets."""
-        try:
-            if not self.sniffing:
-                return
+        """Process captured packets and update statistics."""
+        if not self.sniffing:
+            return
 
-            # Get current time relative to start
-            current_time = time.time() - self.start_time
+        try:
+            # Update status on first packet
+            if self.packet_count == 0:
+                self.status_bar.config(text="Capture active", fg="white")
+                self.loading_label.config(text="●", fg="#00ff00")  # Show active indicator
             
-            # Format console output for packet info
-            console_output = "\r" + "─" * 60 + "\n"
-            console_output += f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            # Create a queue for GUI updates if it doesn't exist
+            if not hasattr(self, 'gui_update_queue'):
+                self.gui_update_queue = []
+
+            # Get current time
+            current_time = time.time()
             
-            # Create packet details dictionary for logging
+            # Update total bytes and packet sizes
+            packet_size = len(packet)
+            self.total_bytes += packet_size
+            self.packet_sizes.append(packet_size)
+            
+            # Format packet details for logging
             packet_details = {
-                "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-                "protocol": "Unknown",
-                "src": None,
-                "dst": None,
-                "src_port": None,
-                "dst_port": None,
-                "length": len(packet),
-                "payload": None
+                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'protocol': 'Unknown',
+                'src': '',
+                'dst': '',
+                'src_port': '',
+                'dst_port': '',
+                'length': packet_size,
+                'payload': ''
             }
             
+            # Determine packet protocol and update counters
             if IP in packet:
-                packet_details["protocol"] = "IP"
-                packet_details["src"] = packet[IP].src
-                packet_details["dst"] = packet[IP].dst
-                console_output += f"Protocol: {packet.proto}\n"
-                console_output += f"Source IP: {packet[IP].src}\n"
-                console_output += f"Destination IP: {packet[IP].dst}\n"
+                packet_details['src'] = packet[IP].src
+                packet_details['dst'] = packet[IP].dst
                 
                 if TCP in packet:
-                    packet_details["protocol"] = "TCP"
-                    packet_details["src_port"] = packet[TCP].sport
-                    packet_details["dst_port"] = packet[TCP].dport
-                    console_output += f"Source Port: {packet[TCP].sport}\n"
-                    console_output += f"Destination Port: {packet[TCP].dport}\n"
+                    packet_details['protocol'] = 'TCP'
+                    packet_details['src_port'] = packet[TCP].sport
+                    packet_details['dst_port'] = packet[TCP].dport
+                    self.protocol_count['TCP'] += 1
                 elif UDP in packet:
-                    packet_details["protocol"] = "UDP"
-                    packet_details["src_port"] = packet[UDP].sport
-                    packet_details["dst_port"] = packet[UDP].dport
-                    console_output += f"Source Port: {packet[UDP].sport}\n"
-                    console_output += f"Destination Port: {packet[UDP].dport}\n"
+                    packet_details['protocol'] = 'UDP'
+                    packet_details['src_port'] = packet[UDP].sport
+                    packet_details['dst_port'] = packet[UDP].dport
+                    self.protocol_count['UDP'] += 1
                 elif ICMP in packet:
-                    packet_details["protocol"] = "ICMP"
-                elif packet.haslayer(DNS):
-                    packet_details["protocol"] = "DNS"
+                    packet_details['protocol'] = 'ICMP'
+                    self.protocol_count['ICMP'] += 1
+                
+                if packet.haslayer(DNS):
+                    packet_details['protocol'] = 'DNS'
+                    self.protocol_count['DNS'] += 1
             elif ARP in packet:
-                packet_details["protocol"] = "ARP"
-                packet_details["src"] = packet[ARP].hwsrc
-                packet_details["dst"] = packet[ARP].hwdst
-                console_output += f"Protocol: ARP\n"
-                console_output += f"Source MAC: {packet[ARP].hwsrc}\n"
-                console_output += f"Destination MAC: {packet[ARP].hwdst}\n"
-            
+                packet_details['protocol'] = 'ARP'
+                packet_details['src'] = packet[ARP].psrc
+                packet_details['dst'] = packet[ARP].pdst
+                self.protocol_count['ARP'] += 1
+
             # Add payload if present
             if Raw in packet:
                 try:
                     payload = packet[Raw].load.decode('utf-8', errors='replace')
-                    packet_details["payload"] = payload
+                    packet_details['payload'] = payload[:500]  # Limit payload size
                 except:
-                    packet_details["payload"] = packet[Raw].load.hex()
-            
-            console_output += "─" * 60 + "\n"
-            
-            # Print to console with clean formatting
-            sys.stdout.write(console_output)
-            sys.stdout.flush()
+                    packet_details['payload'] = packet[Raw].load.hex()[:500]  # Hex format if can't decode
 
-            # Log packet details to file
+            # Log packet to JSON file
             self.log_packet(packet_details)
 
-            # Process the packet and update protocol-specific counts
-            packet_protocol = packet_details["protocol"]
-            if packet_protocol in self.protocol_current_count:
-                self.protocol_current_count[packet_protocol] += 1
-                self.protocol_times[packet_protocol].append(current_time)
-                self.protocol_counts[packet_protocol].append(self.protocol_current_count[packet_protocol])
+            # Update protocol-specific statistics
+            if packet_details['protocol'] in self.protocol_times:
+                self.protocol_current_count[packet_details['protocol']] += 1
+                self.protocol_times[packet_details['protocol']].append(current_time)
+                self.protocol_counts[packet_details['protocol']].append(
+                    self.protocol_current_count[packet_details['protocol']]
+                )
 
-            # Always update the "All" protocol statistics
+            # Update "All" protocol statistics
             self.protocol_current_count['All'] += 1
             self.protocol_times['All'].append(current_time)
             self.protocol_counts['All'].append(self.protocol_current_count['All'])
 
-            # Format packet information for display
-            packet_info = f"Time: {packet_details['timestamp']}\n"
-            packet_info += f"Protocol: {packet_details['protocol']}\n"
-            if packet_details['src']:
-                packet_info += f"Source: {packet_details['src']}\n"
-            if packet_details['dst']:
-                packet_info += f"Destination: {packet_details['dst']}\n"
-            if packet_details['src_port']:
-                packet_info += f"Source Port: {packet_details['src_port']}\n"
-            if packet_details['dst_port']:
-                packet_info += f"Destination Port: {packet_details['dst_port']}\n"
-            packet_info += "-" * 50 + "\n"
-
-            # Display packet if it matches the filter or if "All" is selected
-            if self.protocol_var.get() == "All" or self.protocol_var.get() == packet_protocol:
-                self.insert_text(self.output_text, packet_info)
-
-            # Update packet count label
-            self.packet_count += 1
-            self.packet_count_label.config(text=f"Packets Captured: {self.packet_count}")
-
-            # Store packet for analysis
+            # Store packet for analysis (limit stored packets to prevent memory issues)
+            MAX_STORED_PACKETS = 1000
             self.captured_packets.append(packet)
+            if len(self.captured_packets) > MAX_STORED_PACKETS:
+                self.captured_packets.pop(0)
 
-            # Update protocol counts in the statistics
-            if packet_protocol in self.protocol_count:
-                self.protocol_count[packet_protocol] = self.protocol_current_count[packet_protocol]
+            # Update packet count
+            self.packet_count += 1
+
+            # Format packet info for display
+            packet_info = self.format_packet_info(packet)
+            
+            # Queue GUI updates
+            self.gui_update_queue.append(packet_info)
+            
+            # Process GUI updates periodically
+            if len(self.gui_update_queue) >= 10 or (current_time - getattr(self, 'last_gui_update', 0) > 0.5):
+                self.process_gui_updates()
 
         except Exception as e:
-            error_msg = f"\n[ERROR] Packet processing error: {str(e)}\n"
-            print(error_msg)
             logging.error(f"Error in packet callback: {e}")
 
     def log_packet(self, packet_details):
@@ -1085,6 +1548,171 @@ class PacketSnifferApp:
                 
         except Exception as e:
             logging.error(f"Error logging packet: {e}")
+            # Create the file if it doesn't exist
+            if not os.path.exists(self.log_file):
+                try:
+                    with open(self.log_file, "w", encoding='utf-8') as f:
+                        f.write("")  # Create empty file
+                except Exception as create_error:
+                    logging.error(f"Error creating log file: {create_error}")
+
+    def process_gui_updates(self):
+        """Process queued GUI updates."""
+        try:
+            if not hasattr(self, 'last_gui_update'):
+                self.last_gui_update = time.time()
+            
+            if hasattr(self, 'gui_update_queue') and self.gui_update_queue:
+                # Update statistics labels
+                self.root.after(0, self.update_statistics_labels)
+                
+                # Update text display with all queued packets
+                combined_info = ''.join(self.gui_update_queue)
+                self.root.after(0, lambda: self.insert_text(self.output_text, combined_info))
+                
+                # Clear the queue
+                self.gui_update_queue = []
+                self.last_gui_update = time.time()
+        except Exception as e:
+            logging.error(f"Error processing GUI updates: {e}")
+
+    def format_packet_info(self, packet):
+        """Format packet information for display."""
+        packet_info = "═" * 60 + "\n"
+        packet_info += f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        
+        try:
+            # Determine protocol type
+            protocol_type = "Unknown"
+            if IP in packet:
+                if TCP in packet:
+                    protocol_type = "TCP"
+                    src_port = packet[TCP].sport
+                    dst_port = packet[TCP].dport
+                    packet_info += f"Protocol: {protocol_type}\n"
+                    packet_info += f"Source IP: {packet[IP].src}:{src_port}\n"
+                    packet_info += f"Destination IP: {packet[IP].dst}:{dst_port}\n"
+                    # Add TCP flags
+                    flags = []
+                    if packet[TCP].flags.S: flags.append('SYN')
+                    if packet[TCP].flags.A: flags.append('ACK')
+                    if packet[TCP].flags.F: flags.append('FIN')
+                    if packet[TCP].flags.R: flags.append('RST')
+                    if packet[TCP].flags.P: flags.append('PSH')
+                    packet_info += f"TCP Flags: {' '.join(flags) if flags else 'None'}\n"
+                elif UDP in packet:
+                    protocol_type = "UDP"
+                    src_port = packet[UDP].sport
+                    dst_port = packet[UDP].dport
+                    packet_info += f"Protocol: {protocol_type}\n"
+                    packet_info += f"Source IP: {packet[IP].src}:{src_port}\n"
+                    packet_info += f"Destination IP: {packet[IP].dst}:{dst_port}\n"
+                elif ICMP in packet:
+                    protocol_type = "ICMP"
+                    packet_info += f"Protocol: {protocol_type}\n"
+                    packet_info += f"Source IP: {packet[IP].src}\n"
+                    packet_info += f"Destination IP: {packet[IP].dst}\n"
+                    packet_info += f"ICMP Type: {packet[ICMP].type}\n"
+                    packet_info += f"ICMP Code: {packet[ICMP].code}\n"
+                
+                if packet.haslayer(DNS):
+                    protocol_type = "DNS"
+                    packet_info += "DNS Information:\n"
+                    if packet.haslayer(DNSQR):
+                        packet_info += f"  Query: {packet[DNSQR].qname.decode()}\n"
+                    if packet.haslayer(DNSRR):
+                        packet_info += f"  Response: {packet[DNSRR].rdata}\n"
+            elif ARP in packet:
+                protocol_type = "ARP"
+                packet_info += f"Protocol: {protocol_type}\n"
+                packet_info += f"Source MAC: {packet[ARP].hwsrc}\n"
+                packet_info += f"Destination MAC: {packet[ARP].hwdst}\n"
+                packet_info += f"Source IP: {packet[ARP].psrc}\n"
+                packet_info += f"Destination IP: {packet[ARP].pdst}\n"
+                packet_info += f"Operation: {'Request' if packet[ARP].op == 1 else 'Reply'}\n"
+            
+            # Add a clear protocol identifier at the top
+            packet_info = f"[{protocol_type} Packet]\n" + packet_info
+            
+            # Add packet length
+            packet_info += f"Packet Length: {len(packet)} bytes\n"
+            
+            # Add payload if present
+            if Raw in packet:
+                try:
+                    payload = packet[Raw].load.decode('utf-8', errors='replace')
+                    if len(payload) > 100:
+                        packet_info += f"Payload: {payload[:100]}...\n"
+                    else:
+                        packet_info += f"Payload: {payload}\n"
+                except:
+                    hex_payload = packet[Raw].load.hex()
+                    if len(hex_payload) > 100:
+                        packet_info += f"Payload (hex): {hex_payload[:100]}...\n"
+                    else:
+                        packet_info += f"Payload (hex): {hex_payload}\n"
+        except Exception as e:
+            packet_info += f"Error formatting packet details: {str(e)}\n"
+        
+        packet_info += "═" * 60 + "\n\n"
+        return packet_info
+
+    def update_statistics_labels(self):
+        """Update the statistics labels with current values."""
+        try:
+            # Update total packets
+            self.total_packets_label.config(text=f"Total Packets: {self.packet_count}")
+            
+            # Update total bytes
+            self.total_bytes_label.config(text=f"Total Bytes: {self.total_bytes}")
+            
+            # Update average packet size
+            if self.packet_sizes:
+                avg_size = sum(self.packet_sizes) / len(self.packet_sizes)
+                self.avg_packet_size_label.config(text=f"Average Packet Size: {avg_size:.2f} bytes")
+            
+            # Update protocol counts
+            for protocol in self.protocol_count:
+                if protocol in self.protocol_labels:
+                    self.protocol_labels[protocol].config(
+                        text=f"{protocol}: {self.protocol_count[protocol]}"
+                    )
+            
+            # Update packet count in main display
+            self.packet_count_label.config(text=f"Packets Captured: {self.packet_count}")
+            
+        except Exception as e:
+            logging.error(f"Error updating statistics labels: {e}")
+
+    def clear_statistics(self):
+        """Reset all statistics counters and displays."""
+        try:
+            # Reset counters
+            self.packet_count = 0
+            self.total_bytes = 0
+            self.packet_sizes = []
+            
+            # Reset protocol counts
+            for protocol in self.protocol_count:
+                self.protocol_count[protocol] = 0
+                self.protocol_current_count[protocol] = 0
+                if protocol in self.protocol_times:
+                    self.protocol_times[protocol] = []
+                    self.protocol_counts[protocol] = []
+            
+            # Reset "All" protocol statistics
+            self.protocol_current_count['All'] = 0
+            self.protocol_times['All'] = []
+            self.protocol_counts['All'] = []
+            
+            # Update labels
+            self.update_statistics_labels()
+            
+            # Clear graph
+            self.clear_graph()
+            
+        except Exception as e:
+            logging.error(f"Error clearing statistics: {e}")
 
     def view_packet_log(self):
         """Display the packet log in the logging tab with pagination."""
@@ -1102,8 +1730,12 @@ class PacketSnifferApp:
                 return
 
             # Read the entire file to count total entries
-            with open(self.log_file, "r", encoding='utf-8') as f:
-                all_lines = list(filter(None, f.readlines()))  # Remove empty lines
+            try:
+                with open(self.log_file, "r", encoding='utf-8') as f:
+                    all_lines = [line.strip() for line in f if line.strip()]  # Remove empty lines
+            except Exception as e:
+                self.insert_text(self.logging_text, f"Error reading log file: {str(e)}\n")
+                return
             
             if not all_lines:
                 self.insert_text(self.logging_text, "Packet log is empty. No packets have been captured yet.\n")
@@ -1131,11 +1763,12 @@ class PacketSnifferApp:
             for line in all_lines[start_idx:end_idx]:
                 try:
                     # Parse JSON and format output
-                    packet_data = json.loads(line.strip())
+                    packet_data = json.loads(line)
                     formatted_output = self.format_packet_log_entry(packet_data)
                     self.insert_text(self.logging_text, formatted_output)
                 except json.JSONDecodeError as e:
                     logging.error(f"Error parsing JSON: {e}")
+                    self.insert_text(self.logging_text, f"Error parsing packet data: {line[:100]}...\n")
                     continue
                 except Exception as e:
                     logging.error(f"Error processing log entry: {e}")
@@ -1144,10 +1777,56 @@ class PacketSnifferApp:
             # Update or create pagination controls
             self.update_pagination_controls(total_pages)
 
+            # Scroll to top of text widget
+            self.logging_text.see("1.0")
+
         except Exception as e:
             error_msg = f"Error loading packet log: {str(e)}\n"
             self.insert_text(self.logging_text, error_msg)
             logging.error(f"Error loading packet log: {e}")
+
+    def format_packet_log_entry(self, packet_data):
+        """Format a packet log entry for display."""
+        try:
+            output = "╔" + "═" * 58 + "╗\n"
+            
+            # Timestamp and Protocol
+            output += f"║ Time: {packet_data.get('timestamp', 'N/A'):<52}║\n"
+            output += f"║ Protocol: {packet_data.get('protocol', 'Unknown'):<49}║\n"
+            
+            # Source Information
+            if packet_data.get('src'):
+                src_info = packet_data['src']
+                if packet_data.get('src_port'):
+                    src_info += f":{packet_data['src_port']}"
+                output += f"║ Source: {src_info:<51}║\n"
+            
+            # Destination Information
+            if packet_data.get('dst'):
+                dst_info = packet_data['dst']
+                if packet_data.get('dst_port'):
+                    dst_info += f":{packet_data['dst_port']}"
+                output += f"║ Destination: {dst_info:<47}║\n"
+            
+            # Packet Length
+            if packet_data.get('length'):
+                output += f"║ Length: {packet_data['length']} bytes{' ' * (44 - len(str(packet_data['length'])))}║\n"
+            
+            # Payload (if exists)
+            payload = packet_data.get('payload', '')
+            if payload:
+                output += "║ Payload:                                                    ║\n"
+                # Split payload into chunks of 50 characters
+                payload = payload[:200]  # Limit payload display
+                chunks = [payload[i:i+50] for i in range(0, len(payload), 50)]
+                for chunk in chunks:
+                    output += f"║ {chunk:<58}║\n"
+            
+            output += "╚" + "═" * 58 + "╝\n\n"
+            return output
+        except Exception as e:
+            logging.error(f"Error formatting packet log entry: {e}")
+            return f"Error formatting packet data: {str(e)}\n"
 
     def update_pagination_controls(self, total_pages):
         """Update or create pagination controls."""
@@ -1224,35 +1903,6 @@ class PacketSnifferApp:
             font=("Arial", 10)
         )
         self.jump_button.pack(side=tk.LEFT, padx=5)
-
-    def format_packet_log_entry(self, packet_data):
-        """Format a packet log entry for display."""
-        output = "╔" + "═" * 58 + "╗\n"
-        output += f"║ Timestamp: {packet_data.get('timestamp', 'N/A'):<47}║\n"
-        output += f"║ Protocol: {packet_data.get('protocol', 'N/A'):<49}║\n"
-        
-        if packet_data.get('src'):
-            output += f"║ Source: {packet_data['src']:<51}║\n"
-        if packet_data.get('dst'):
-            output += f"║ Destination: {packet_data['dst']:<47}║\n"
-        if packet_data.get('src_port'):
-            output += f"║ Source Port: {packet_data['src_port']:<47}║\n"
-        if packet_data.get('dst_port'):
-            output += f"║ Destination Port: {packet_data['dst_port']:<43}║\n"
-        if packet_data.get('length'):
-            output += f"║ Length: {packet_data['length']:<51}║\n"
-        
-        payload = packet_data.get('payload', 'No payload')
-        if payload != 'No payload':
-            output += "║ Payload:                                                    ║\n"
-            # Split payload into chunks of 50 characters
-            payload = payload[:200]  # Limit payload display
-            chunks = [payload[i:i+50] for i in range(0, len(payload), 50)]
-            for chunk in chunks:
-                output += f"║ {chunk:<58}║\n"
-        
-        output += "╚" + "═" * 58 + "╝\n\n"
-        return output
 
     def jump_to_page(self):
         """Jump to a specific page number."""
@@ -1335,48 +1985,131 @@ class PacketSnifferApp:
 
     def toggle_dark_mode(self):
         """Toggle between light and dark mode."""
-        print("Toggle Dark Mode clicked.")  # Debugging statement
-
-        if not self.is_dark_mode:
-            # Switch to dark mode
-            self.root.configure(bg="#2E2E2E")  # Dark background
-            self.style.configure("TFrame", background="#2E2E2E")  # Update style for dark mode
-
-            # Update all tabs
-            for tab in [self.packet_filter_tab, self.logging_tab, self.inspection_tab, self.statistics_tab]:
-                tab.configure(bg="#2E2E2E")  # Set tab background to dark
-
-            # Update labels and text areas
-            for widget in self.root.winfo_children():
-                if isinstance(widget, tk.Label):
-                    widget.configure(bg="#2E2E2E", fg="white")
-                elif isinstance(widget, scrolledtext.ScrolledText):
-                    widget.configure(bg="#1E1E1E", fg="white")
-                elif isinstance(widget, tk.Button):
-                    widget.configure(bg="#007BFF", fg="white")
-
-            self.is_dark_mode = True  # Update theme state
-            print("Switched to dark mode.")  # Debugging statement
-        else:
-            # Switch to light mode
-            self.root.configure(bg="#FFFFFF")  # Light background
-            self.style.configure("TFrame", background="#FFFFFF")  # Update style for light mode
-
-            # Update all tabs
-            for tab in [self.packet_filter_tab, self.logging_tab, self.inspection_tab, self.statistics_tab]:
-                tab.configure(bg="#FFFFFF")  # Set tab background to light
-
-            # Update labels and text areas
-            for widget in self.root.winfo_children():
-                if isinstance(widget, tk.Label):
-                    widget.configure(bg="#FFFFFF", fg="black")
-                elif isinstance(widget, scrolledtext.ScrolledText):
-                    widget.configure(bg="#FFFFFF", fg="black")
-                elif isinstance(widget, tk.Button):
-                    widget.configure(bg="#007BFF", fg="white")
-
-            self.is_dark_mode = False  # Update theme state
-            print("Switched to light mode.")  # Debugging statement
+        try:
+            if not self.is_dark_mode:
+                # Switch to dark mode
+                self.root.configure(bg="#2E2E2E")
+                self.style.configure("TFrame", background="#2E2E2E")
+                self.style.configure("Custom.TFrame", background="#2E2E2E")
+                
+                # Update notebook style
+                self.style.configure("TNotebook", background="#2E2E2E")
+                self.style.configure("TNotebook.Tab",
+                                   background="#1E1E1E",
+                                   foreground="#FFFFFF")
+                
+                # Update all frames
+                for tab in [self.packet_filter_tab, self.logging_tab, 
+                          self.inspection_tab, self.statistics_tab]:
+                    tab.configure(style="Custom.TFrame")
+                
+                # Update text widgets
+                for widget in self.root.winfo_children():
+                    if isinstance(widget, scrolledtext.ScrolledText):
+                        widget.configure(bg="#1E1E1E", fg="#FFFFFF",
+                                      insertbackground="white")
+                    elif isinstance(widget, tk.Label):
+                        widget.configure(bg="#2E2E2E", fg="white")
+                    elif isinstance(widget, tk.Button):
+                        widget.configure(bg="#007BFF", fg="white")
+                    elif isinstance(widget, ttk.Frame):
+                        widget.configure(style="Custom.TFrame")
+                
+                # Update protocol labels
+                if hasattr(self, 'protocol_labels'):
+                    for label in self.protocol_labels.values():
+                        label.configure(bg="#2E2E2E", fg="white")
+                
+                # Update statistics labels
+                for attr in ['total_packets_label', 'total_bytes_label', 
+                           'avg_packet_size_label']:
+                    if hasattr(self, attr):
+                        getattr(self, attr).configure(bg="#2E2E2E", fg="white")
+                
+                self.is_dark_mode = True
+                logging.info("Switched to dark mode")
+                
+            else:
+                # Switch to light mode
+                self.root.configure(bg="#F0F0F0")  # Light gray background
+                self.style.configure("TFrame", background="#F0F0F0")
+                self.style.configure("Custom.TFrame", background="#F0F0F0")
+                
+                # Update notebook style
+                self.style.configure("TNotebook", background="#F0F0F0")
+                self.style.configure("TNotebook.Tab",
+                                   background="#E0E0E0",
+                                   foreground="#000000")
+                
+                # Update all frames
+                for tab in [self.packet_filter_tab, self.logging_tab, 
+                          self.inspection_tab, self.statistics_tab]:
+                    tab.configure(style="Custom.TFrame")
+                
+                # Update text widgets
+                for widget in self.root.winfo_children():
+                    if isinstance(widget, scrolledtext.ScrolledText):
+                        widget.configure(bg="#FFFFFF", fg="#000000",
+                                      insertbackground="black")
+                    elif isinstance(widget, tk.Label):
+                        widget.configure(bg="#F0F0F0", fg="black")
+                    elif isinstance(widget, tk.Button):
+                        widget.configure(bg="#E0E0E0", fg="black")
+                    elif isinstance(widget, ttk.Frame):
+                        widget.configure(style="Custom.TFrame")
+                
+                # Update protocol labels
+                if hasattr(self, 'protocol_labels'):
+                    for label in self.protocol_labels.values():
+                        label.configure(bg="#F0F0F0", fg="black")
+                
+                # Update statistics labels
+                for attr in ['total_packets_label', 'total_bytes_label', 
+                           'avg_packet_size_label']:
+                    if hasattr(self, attr):
+                        getattr(self, attr).configure(bg="#F0F0F0", fg="black")
+                
+                self.is_dark_mode = False
+                logging.info("Switched to light mode")
+            
+            # Update graph colors and visibility
+            if hasattr(self, 'ax') and hasattr(self, 'canvas'):
+                # Set background colors
+                self.ax.set_facecolor('#1E1E1E' if self.is_dark_mode else '#FFFFFF')
+                self.fig.set_facecolor('#2E2E2E' if self.is_dark_mode else '#F0F0F0')
+                
+                # Set text colors
+                text_color = '#FFFFFF' if self.is_dark_mode else '#000000'
+                grid_color = '#FFFFFF' if self.is_dark_mode else '#808080'
+                line_color = '#00ff00' if self.is_dark_mode else '#008000'
+                
+                # Update all text elements
+                self.ax.tick_params(colors=text_color, labelcolor=text_color)
+                
+                # Update title and labels
+                title_obj = self.ax.get_title()
+                self.ax.set_title(title_obj, color=text_color, pad=10, fontsize=10)
+                self.ax.set_xlabel(self.ax.get_xlabel(), color=text_color, fontsize=8)
+                self.ax.set_ylabel(self.ax.get_ylabel(), color=text_color, fontsize=8)
+                
+                # Update spines
+                for spine in self.ax.spines.values():
+                    spine.set_color(text_color)
+                
+                # Update grid
+                self.ax.grid(True, linestyle='--', alpha=0.3, color=grid_color)
+                
+                # Update line color if there's a plot
+                if len(self.ax.lines) > 0:
+                    for line in self.ax.lines:
+                        line.set_color(line_color)
+                
+                # Force redraw
+                self.canvas.draw()
+            
+        except Exception as e:
+            logging.error(f"Error toggling dark mode: {e}")
+            messagebox.showerror("Error", f"Failed to toggle dark mode: {str(e)}")
 
     def validate_ip_address(self, ip_address):
         """Validate IP address format."""
@@ -1583,205 +2316,230 @@ class PacketSnifferApp:
         text_widget.config(state='disabled')  # Make read-only again
 
     def create_statistics_tab(self):
-        """Create the content for the Live Statistics tab."""
-        # Create a frame for the graph
-        graph_frame = ttk.Frame(self.statistics_frame)
-        graph_frame.pack(expand=True, fill=tk.BOTH, pady=10)
+        """Create the content for the Statistics tab with modern styling."""
+        # Create main container frame with custom style
+        stats_container = ttk.Frame(self.statistics_frame, style="Custom.TFrame")
+        stats_container.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
 
-        # Initialize the live graph for statistics
-        self.fig, self.ax = plt.subplots(figsize=(12, 6))  # Increase figure size
-        self.ax.set_title("Live Packet Statistics Over Time", fontsize=14)
-        self.ax.set_xlabel("Time (s)", fontsize=12)
-        self.ax.set_ylabel("Count", fontsize=12)
-        self.ax.set_xlim(0, 60)  # Set x-axis limit for 60 seconds
-        self.ax.set_ylim(0, 100)  # Set y-axis limit for counts
-        self.ax.grid(True, linestyle='--', alpha=0.7)  # Add grid
+        # Header frame
+        header_frame = ttk.Frame(stats_container, style="Custom.TFrame")
+        header_frame.pack(fill=tk.X, padx=10, pady=5)
 
-        # Create a canvas to embed the plot in Tkinter
+        header_label = ttk.Label(header_frame,
+                               text="Network Statistics",
+                               font=('Helvetica', 16, 'bold'),
+                               foreground="white",
+                               background="#2E2E2E")
+        header_label.pack(pady=10)
+
+        # Create left panel for statistics
+        left_panel = ttk.Frame(stats_container, style="Custom.TFrame")
+        left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+
+        # Statistics labels with modern styling
+        stats_style = {
+            'font': ('Helvetica', 12),
+            'bg': "#2E2E2E",
+            'fg': "white",
+            'pady': 5
+        }
+
+        # Total packets
+        self.total_packets_label = tk.Label(
+            left_panel,
+            text="Total Packets: 0",
+            **stats_style
+        )
+        self.total_packets_label.pack(anchor=tk.W)
+
+        # Total bytes
+        self.total_bytes_label = tk.Label(
+            left_panel,
+            text="Total Bytes: 0",
+            **stats_style
+        )
+        self.total_bytes_label.pack(anchor=tk.W)
+
+        # Average packet size
+        self.avg_packet_size_label = tk.Label(
+            left_panel,
+            text="Average Packet Size: 0 bytes",
+            **stats_style
+        )
+        self.avg_packet_size_label.pack(anchor=tk.W)
+
+        # Protocol counts
+        protocols_frame = ttk.Frame(left_panel, style="Custom.TFrame")
+        protocols_frame.pack(fill=tk.X, pady=10)
+
+        protocols_label = tk.Label(
+            protocols_frame,
+            text="Protocol Distribution",
+            font=('Helvetica', 14, 'bold'),
+            bg="#2E2E2E",
+            fg="#00ff00"
+        )
+        protocols_label.pack(anchor=tk.W)
+
+        # Protocol count labels
+        self.protocol_labels = {}
+        for protocol in ['TCP', 'UDP', 'ICMP', 'ARP', 'DNS']:
+            self.protocol_labels[protocol] = tk.Label(
+                protocols_frame,
+                text=f"{protocol}: 0",
+                **stats_style
+            )
+            self.protocol_labels[protocol].pack(anchor=tk.W)
+
+        # Create right panel for graph
+        right_panel = ttk.Frame(stats_container, style="Custom.TFrame")
+        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
+
+        # Graph frame
+        graph_frame = ttk.Frame(right_panel, style="Custom.TFrame")
+        graph_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Create Figure and Canvas for the graph with increased DPI and size
+        self.fig = Figure(figsize=(8, 6), dpi=100, facecolor='#2E2E2E')
+        self.ax = self.fig.add_subplot(111)
+        
+        # Style the graph
+        self.ax.set_facecolor('#1E1E1E')
+        self.ax.tick_params(colors='white', labelsize=8)
+        for spine in self.ax.spines.values():
+            spine.set_color('white')
+        
+        # Initialize with proper limits and styling
+        self.ax.set_title('Packet Rate Over Time', color='white', pad=20, fontsize=10)
+        self.ax.set_xlabel('Time (s)', color='white', fontsize=8)
+        self.ax.set_ylabel('Packets/s', color='white', fontsize=8)
+        self.ax.grid(True, linestyle='--', alpha=0.3, color='white')
+        
+        # Set initial axis limits
+        self.ax.set_xlim(0, 30)
+        self.ax.set_ylim(0, 10)
+
+        # Create canvas with improved rendering
         self.canvas = FigureCanvasTkAgg(self.fig, master=graph_frame)
-        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Add clear graph button
+        # Button container
+        button_container = ttk.Frame(right_panel, style="Custom.TFrame")
+        button_container.pack(fill=tk.X, pady=10)
+
+        # Clear graph button with modern styling
         clear_graph_button = tk.Button(
-            graph_frame,
-            text="Clear Graph",
+            button_container,
+            text="🗑 Clear Graph",
             command=self.clear_graph,
             bg="#dc3545",
             fg="white",
-            font=("Arial", 12),
+            font=("Helvetica", 11, "bold"),
+            relief="flat",
             padx=20,
-            pady=5
+            pady=8,
+            cursor="hand2"
         )
-        clear_graph_button.pack(pady=5)
+        clear_graph_button.pack(side=tk.RIGHT, padx=5)
 
-        # Schedule the first graph update
-        self.root.after(1000, self.update_graph)  # Start updating after 1 second
+        # Add hover effect for the clear button
+        clear_graph_button.bind("<Enter>", lambda e, b=clear_graph_button: self.on_button_hover(e, b))
+        clear_graph_button.bind("<Leave>", lambda e, b=clear_graph_button: self.on_button_leave(e, b))
 
-        # Create a frame for statistics labels
-        stats_frame = ttk.Frame(self.statistics_frame)
-        stats_frame.pack(fill=tk.X, padx=10, pady=5)
+        # Initialize graph data
+        self.packet_times = []
+        self.packet_counts = []
+        self.last_update_time = time.time()
+        self.update_interval = 1.0  # Update every second while sniffing
 
-        # Create a centered container for statistics
-        center_stats = ttk.Frame(stats_frame)
-        center_stats.pack(expand=True)
-
-        # Now add the statistics labels below the graph
-        self.total_packets_label = tk.Label(
-            center_stats,
-            text="Total Packets: 0",
-            bg="#FFFFFF",
-            fg="black",
-            font=("Arial", 12)
-        )
-        self.total_packets_label.pack(pady=5)
-
-        self.total_bytes_label = tk.Label(
-            center_stats,
-            text="Total Bytes: 0",
-            bg="#FFFFFF",
-            fg="black",
-            font=("Arial", 12)
-        )
-        self.total_bytes_label.pack(pady=5)
-
-        self.average_packet_size_label = tk.Label(
-            center_stats,
-            text="Average Packet Size: 0",
-            bg="#FFFFFF",
-            fg="black",
-            font=("Arial", 12)
-        )
-        self.average_packet_size_label.pack(pady=5)
-
-        self.tcp_count_label = tk.Label(
-            center_stats,
-            text="TCP Packets: 0",
-            bg="#FFFFFF",
-            fg="black",
-            font=("Arial", 12)
-        )
-        self.tcp_count_label.pack(pady=5)
-
-        self.udp_count_label = tk.Label(
-            center_stats,
-            text="UDP Packets: 0",
-            bg="#FFFFFF",
-            fg="black",
-            font=("Arial", 12)
-        )
-        self.udp_count_label.pack(pady=5)
-
-        self.icmp_count_label = tk.Label(
-            center_stats,
-            text="ICMP Packets: 0",
-            bg="#FFFFFF",
-            fg="black",
-            font=("Arial", 12)
-        )
-        self.icmp_count_label.pack(pady=5)
-
-        self.arp_count_label = tk.Label(
-            center_stats,
-            text="ARP Packets: 0",
-            bg="#FFFFFF",
-            fg="black",
-            font=("Arial", 12)
-        )
-        self.arp_count_label.pack(pady=5)
-
-        self.dns_count_label = tk.Label(
-            center_stats,
-            text="DNS Packets: 0",
-            bg="#FFFFFF",
-            fg="black",
-            font=("Arial", 12)
-        )
-        self.dns_count_label.pack(pady=5)
+        # Start the graph update loop immediately
+        self.update_graph()
 
     def update_graph(self):
         """Update the live graph with the latest statistics."""
         try:
+            if not hasattr(self, 'ax') or not hasattr(self, 'canvas'):
+                return
+
             # Clear the axes for new data
             self.ax.clear()
 
-            # Get the selected protocol
-            selected_protocol = self.protocol_var.get()
+            # Get the selected protocol (default to 'All' if not set)
+            selected_protocol = getattr(self, 'protocol_var', tk.StringVar(value='All')).get()
             
             # Get the data for plotting
-            times = self.protocol_times[selected_protocol]
-            counts = self.protocol_counts[selected_protocol]
+            times = list(self.protocol_times.get(selected_protocol, []))
+            counts = list(self.protocol_counts.get(selected_protocol, []))
             
-            if len(times) > 0:  # Only plot if we have data
-                # Plot packet counts
-                self.ax.plot(times, counts, 
-                           label=f'{selected_protocol} Packets',
-                           color='blue',
-                           linewidth=2,
-                           marker='o',  # Add markers for better visibility
-                           markersize=4,
-                           markerfacecolor='white')
+            # Set colors based on current theme
+            bg_color = '#1E1E1E' if self.is_dark_mode else '#FFFFFF'
+            text_color = '#FFFFFF' if self.is_dark_mode else '#000000'
+            grid_color = '#FFFFFF' if self.is_dark_mode else '#808080'
+            line_color = '#00ff00' if self.is_dark_mode else '#008000'
+            
+            # Set background colors
+            self.ax.set_facecolor(bg_color)
+            self.fig.set_facecolor('#2E2E2E' if self.is_dark_mode else '#F0F0F0')
+            
+            if times and counts:
+                # Convert times to relative times (seconds since start)
+                relative_times = [t - self.start_time for t in times]
                 
-                # Calculate and plot moving average if enough data points
-                if len(counts) > 5:
-                    window_size = 5
-                    moving_avg = []
-                    for i in range(len(counts) - window_size + 1):
-                        window_avg = sum(counts[i:i+window_size]) / window_size
-                        moving_avg.append(window_avg)
-                    
-                    moving_avg_times = times[window_size-1:]
-                    self.ax.plot(moving_avg_times, 
-                               moving_avg,
-                               label=f'Moving Average (5s)',
-                               color='red',
-                               linestyle='--',
-                               linewidth=2)
+                # Ensure we have a point at x=0 if this is the start
+                if not relative_times or relative_times[0] > 0:
+                    relative_times.insert(0, 0)
+                    counts.insert(0, 0)
+                
+                # Plot packet counts with improved line style
+                self.ax.plot(relative_times, counts, 
+                           color=line_color,
+                           linewidth=2,
+                           marker='.',
+                           markersize=4,
+                           label=selected_protocol)
 
                 # Dynamic axis limits
-                if len(times) > 0:
-                    current_time = times[-1]
-                    # Show last 60 seconds of data
-                    x_min = max(0, current_time - 60)
-                    x_max = current_time + 5  # Add 5 second buffer
-                    
-                    # Dynamic y-axis limit based on maximum count
-                    y_max = max(max(counts) * 1.2, 10)  # At least show up to 10
-                    
-                    self.ax.set_xlim(x_min, x_max)
-                    self.ax.set_ylim(0, y_max)
-                else:
-                    # Default limits if no data
-                    self.ax.set_xlim(0, 60)
-                    self.ax.set_ylim(0, 10)
+                current_time = relative_times[-1]
+                x_min = max(0, current_time - 30)  # Show last 30 seconds
+                x_max = current_time + 2  # Add 2 second buffer
+                
+                # Dynamic y-axis limit with minimum of 10
+                y_max = max(max(counts) * 1.2, 10)  # At least show up to 10
+                
+                self.ax.set_xlim(x_min, x_max)
+                self.ax.set_ylim(0, y_max)
+            else:
+                # Default limits if no data
+                self.ax.set_xlim(0, 30)
+                self.ax.set_ylim(0, 10)
 
-                # Improve grid appearance
-                self.ax.grid(True, linestyle='--', alpha=0.7)
-                
-                # Set title and labels with larger font
-                self.ax.set_title(f"Live {selected_protocol} Packet Statistics", 
-                                fontsize=14, 
-                                pad=10)
-                self.ax.set_xlabel("Time (seconds)", fontsize=12)
-                self.ax.set_ylabel("Packet Count", fontsize=12)
-                
-                # Improve legend
-                self.ax.legend(loc='upper left', 
-                             fontsize=10, 
-                             facecolor='white', 
-                             edgecolor='gray',
-                             framealpha=0.8)
-                
-                # Update the canvas
-                self.canvas.draw()
+            # Style the graph
+            self.ax.grid(True, linestyle='--', alpha=0.3, color=grid_color)
+            
+            # Set title and labels with proper colors
+            self.ax.set_title(f"{selected_protocol} Packets/Second", 
+                            color=text_color, 
+                            pad=10,
+                            fontsize=10)
+            self.ax.set_xlabel("Time (seconds)", color=text_color, fontsize=8)
+            self.ax.set_ylabel("Packets/sec", color=text_color, fontsize=8)
+            
+            # Style ticks and spines
+            self.ax.tick_params(axis='both', colors=text_color, labelcolor=text_color, labelsize=8)
+            for spine in self.ax.spines.values():
+                spine.set_color(text_color)
+
+            # Update the canvas with improved rendering
+            self.fig.tight_layout()
+            self.canvas.draw()
 
         except Exception as e:
             logging.error(f"Error updating graph: {e}")
         finally:
-            # Schedule the next update
-            if self.sniffing:
-                self.root.after(1000, self.update_graph)  # Update every second
-            else:
-                self.root.after(2000, self.update_graph)  # Check less frequently when not sniffing
+            # Schedule next update based on sniffing state
+            update_interval = 1000 if self.sniffing else 2000  # 1 second when sniffing, 2 seconds when not
+            self.root.after(update_interval, self.update_graph)
 
     def clear_terminal(self):
         """Clear the terminal screen based on the operating system."""
@@ -1802,6 +2560,270 @@ class PacketSnifferApp:
         print("Initializing application...")
         print("Please wait while the GUI loads...\n")
 
+    def refresh_packet_list(self):
+        """Refresh the packet list in the inspection tab."""
+        try:
+            # Clear the current list
+            self.packet_listbox.delete(0, tk.END)
+            
+            # Check if log file exists
+            if not os.path.exists(self.log_file):
+                self.insert_text(self.packet_details, "No packet log found. Start capturing packets to create a log.\n")
+                return
+                
+            # Read and display packets from the log file
+            with open(self.log_file, "r", encoding='utf-8') as f:
+                for line in f:
+                    try:
+                        packet_data = json.loads(line.strip())
+                        # Create a summary string for the listbox
+                        summary = f"{packet_data['timestamp']} - {packet_data['protocol']}"
+                        if packet_data['src']:
+                            summary += f" from {packet_data['src']}"
+                        if packet_data['dst']:
+                            summary += f" to {packet_data['dst']}"
+                        self.packet_listbox.insert(tk.END, summary)
+                    except json.JSONDecodeError:
+                        continue
+                    except Exception as e:
+                        logging.error(f"Error processing packet entry: {e}")
+                        continue
+            
+            # Select the first item if available
+            if self.packet_listbox.size() > 0:
+                self.packet_listbox.selection_set(0)
+                self.inspect_selected_packet()
+                
+        except Exception as e:
+            error_msg = f"Error refreshing packet list: {str(e)}\n"
+            self.insert_text(self.packet_details, error_msg)
+            logging.error(f"Error refreshing packet list: {e}")
+
+    def inspect_selected_packet(self):
+        """Display detailed information about the selected packet."""
+        try:
+            # Get selected index
+            selection = self.packet_listbox.curselection()
+            if not selection:
+                return
+                
+            # Clear current details
+            self.clear_text(self.packet_details)
+            
+            # Get the selected packet index
+            index = selection[0]
+            
+            # Read the corresponding packet from the log file
+            with open(self.log_file, "r", encoding='utf-8') as f:
+                for i, line in enumerate(f):
+                    if i == index:
+                        try:
+                            packet_data = json.loads(line.strip())
+                            # Format and display packet details
+                            details = self.format_packet_details(packet_data)
+                            self.insert_text(self.packet_details, details)
+                            break
+                        except json.JSONDecodeError:
+                            self.insert_text(self.packet_details, "Error: Invalid packet data format\n")
+                        except Exception as e:
+                            self.insert_text(self.packet_details, f"Error processing packet: {str(e)}\n")
+                            
+        except Exception as e:
+            error_msg = f"Error inspecting packet: {str(e)}\n"
+            self.insert_text(self.packet_details, error_msg)
+            logging.error(f"Error inspecting packet: {e}")
+
+    def format_packet_details(self, packet_data):
+        """Format packet details for display."""
+        details = "╔═══════════ Packet Details ═══════════╗\n\n"
+        
+        # Add timestamp
+        details += f"Timestamp: {packet_data.get('timestamp', 'N/A')}\n"
+        details += "═" * 40 + "\n\n"
+        
+        # Protocol information
+        details += f"Protocol: {packet_data.get('protocol', 'Unknown')}\n"
+        details += "═" * 40 + "\n\n"
+        
+        # Network information
+        details += "Network Information:\n"
+        details += "─" * 20 + "\n"
+        if packet_data.get('src'):
+            details += f"Source: {packet_data['src']}\n"
+        if packet_data.get('dst'):
+            details += f"Destination: {packet_data['dst']}\n"
+        if packet_data.get('src_port'):
+            details += f"Source Port: {packet_data['src_port']}\n"
+        if packet_data.get('dst_port'):
+            details += f"Destination Port: {packet_data['dst_port']}\n"
+        details += "\n"
+        
+        # Packet size
+        details += f"Packet Length: {packet_data.get('length', 'N/A')} bytes\n"
+        details += "═" * 40 + "\n\n"
+        
+        # Payload information
+        details += "Payload:\n"
+        details += "─" * 20 + "\n"
+        payload = packet_data.get('payload', 'No payload')
+        if payload != 'No payload':
+            # Limit payload display and add ellipsis if too long
+            max_length = 500
+            if len(payload) > max_length:
+                payload = payload[:max_length] + "...(truncated)"
+            details += payload + "\n"
+        else:
+            details += "No payload\n"
+            
+        details += "\n╚" + "═" * 38 + "╝\n"
+        return details
+
+    def clear_packet_details(self):
+        """Clear the packet details display."""
+        try:
+            self.clear_text(self.packet_details)
+            self.packet_listbox.selection_clear(0, tk.END)
+            self.insert_text(self.packet_details, "Packet details cleared.\n")
+        except Exception as e:
+            logging.error(f"Error clearing packet details: {e}")
+
+    def on_select_packet(self, event):
+        """Handle packet selection event."""
+        self.inspect_selected_packet()
+
+    def start_sniffing(self):
+        """Start capturing packets."""
+        try:
+            self.clear_terminal()
+            self.print_capture_banner()
+            
+            self.start_time = time.time()
+            
+            # Check for admin privileges
+            if platform.system() == 'Windows':
+                import ctypes
+                if not ctypes.windll.shell32.IsUserAnAdmin():
+                    print("\n[ERROR] Administrative privileges required!")
+                    print("Please run the application as administrator.\n")
+                    messagebox.showerror("Permission Error", "This application requires administrative privileges. Please run as administrator.")
+                    self.sniffing = False
+                    self.hide_loading_indicator()
+                    return
+            else:
+                if not os.geteuid() == 0:
+                    print("\n[ERROR] Root privileges required!")
+                    print("Please run the application with sudo.\n")
+                    messagebox.showerror("Permission Error", "This application requires administrative privileges.")
+                    self.sniffing = False
+                    self.hide_loading_indicator()
+                    return
+            
+            # Get current filter type
+            current_filter = self.protocol_var.get()
+            filter_string = self.get_filter_string()
+            
+            # Display filter information
+            filter_info = f"\n[INFO] Starting packet capture with filter: {current_filter}\n"
+            if filter_string:
+                filter_info += f"[INFO] Filter expression: {filter_string}\n"
+            else:
+                filter_info += "[INFO] Capturing all packets (no filter)\n"
+            
+            print(filter_info)
+            self.root.after(0, lambda: self.insert_text(self.output_text, filter_info))
+            print("[INFO] Press Ctrl+C in the GUI to stop capturing.\n")
+            
+            # Start packet capture with a timeout to allow checking sniffing flag
+            while self.sniffing:
+                sniff(prn=self.packet_callback, store=False, filter=filter_string, timeout=0.1)
+                
+        except Exception as e:
+            error_msg = f"\n[ERROR] Failed to start packet capture: {str(e)}"
+            print(error_msg)
+            logging.error(f"Error starting packet capture: {e}")
+            self.root.after(0, lambda: messagebox.showerror("Error", f"Failed to start packet capture: {str(e)}"))
+            self.sniffing = False
+            self.hide_loading_indicator()
+
+    def get_filter_string(self):
+        """Get the filter string based on selected protocol."""
+        protocol = self.protocol_var.get()
+        if protocol == "All":
+            return ""
+        elif protocol == "DNS":
+            return "(udp port 53) or (tcp port 53)"  # Capture both UDP and TCP DNS traffic
+        elif protocol == "ARP":
+            return "arp"
+        else:
+            return protocol.lower()
+
+    def print_capture_banner(self):
+        """Print a banner when capture starts."""
+        banner = """
+╔══════════════════════════════════════════════════════════════╗
+║                   Packet Capture Started                      ║
+╚══════════════════════════════════════════════════════════════╝
+"""
+        print(banner)
+
+    def update_gui(self):
+        """Update the GUI with the latest statistics."""
+        if not self.sniffing:
+            return
+            
+        try:
+            # Update packet count label
+            self.packet_count_label.config(text=f"Packets Captured: {self.packet_count}")
+            
+            # Update protocol labels if they exist
+            if hasattr(self, 'protocol_labels'):
+                for protocol in self.protocol_count:
+                    if protocol in self.protocol_labels:
+                        self.protocol_labels[protocol].config(
+                            text=f"{protocol}: {self.protocol_count[protocol]}"
+                        )
+            
+        except Exception as e:
+            logging.error(f"Error updating GUI: {e}")
+        finally:
+            # Schedule next update if still sniffing
+            if self.sniffing:
+                self.root.after(1000, self.update_gui)  # Update every second
+
+    def update_statistics(self):
+        """Update packet statistics."""
+        try:
+            if self.packet_sizes:
+                avg_size = sum(self.packet_sizes) / len(self.packet_sizes)
+                self.avg_packet_size_label.config(text=f"Average Packet Size: {avg_size:.2f} bytes")
+                
+                # Update total bytes
+                self.total_bytes_label.config(text=f"Total Bytes: {self.total_bytes}")
+                
+                # Update total packets
+                self.total_packets_label.config(text=f"Total Packets: {self.packet_count}")
+                
+        except Exception as e:
+            logging.error(f"Error updating statistics: {e}")
+
+    def update_loading_position(self, event=None):
+        """Update the loading window position when the main window moves."""
+        if hasattr(self, 'loading_window') and self.loading_window.winfo_exists():
+            # Get main window position and size
+            main_x = self.root.winfo_x()
+            main_y = self.root.winfo_y()
+            main_width = self.root.winfo_width()
+            
+            # Get loading window size
+            window_width = self.loading_window.winfo_width()
+            
+            # Calculate new position
+            x = main_x + main_width - window_width - 20
+            y = main_y + 20
+            
+            # Update loading window position
+            self.loading_window.geometry(f"+{x}+{y}")
+
 if __name__ == "__main__":
     # Clear terminal at startup
     if platform.system().lower() == "windows":
@@ -1813,4 +2835,3 @@ if __name__ == "__main__":
     app = PacketSnifferApp(root)
     root.mainloop()
 
-    #python "c:\Users\jowey\Documents\Python Codes\SniffWork\Network Sniffer.py"
